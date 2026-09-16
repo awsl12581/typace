@@ -1,0 +1,6 @@
+textual>=8.2,<9
+pyte>=0.8.2,<0.9
+PySDL3>=0.9.12b1,<0.10
+moderngl>=5.12,<6
+freetype-py>=2.5,<3
+numpy>=2,<3
