@@ -180,11 +180,14 @@ class PlanetDemo(App[None]):
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--backend", choices=("terminal", "sdl"), default="sdl")
+    parser.add_argument("--new-terminal", action="store_true")
     parser.add_argument(
         "--font",
         default=str(Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts/consola.ttf"),
     )
     args = parser.parse_args()
+    if args.new_terminal and args.backend != "terminal":
+        parser.error("--new-terminal requires --backend terminal")
     assets = Path(__file__).resolve().parents[1] / "assets/fonts"
     system_fonts = Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts"
     fallback_fonts = tuple(
@@ -193,7 +196,7 @@ def main() -> None:
         if path.exists()
     )
     if args.backend == "terminal":
-        run(PlanetDemo())
+        run(PlanetDemo(), terminal="new" if args.new_terminal else "current")
     else:
         run(
             PlanetDemo(),

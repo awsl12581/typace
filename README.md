@@ -19,7 +19,8 @@ class MyApp(App[None]):
 
 
 # 选择一个启动方式：
-run(MyApp())  # 真实终端
+run(MyApp())  # 当前终端
+run(MyApp(), terminal="new")  # 新终端
 
 # run(
 #     MyApp(),
@@ -35,12 +36,14 @@ run(MyApp())  # 真实终端
 
 | 接口 | 职责 |
 | --- | --- |
-| `run(app, *, backend="terminal", window=None)` | 启动已有的 Textual 应用，返回它的退出值 |
+| `run(app, *, backend="terminal", terminal="current", window=None)` | 在当前终端、新终端或 SDL 窗口启动应用 |
 | `WindowOptions(font=..., ...)` | 指定 SDL 窗口的字体、标题、尺寸 |
 
-`backend="terminal"` 使用应用原有的 Textual 驱动，不接受窗口配置。
+`backend="terminal"` 使用应用原有的 Textual 驱动；`terminal="current"` 在当前终端
+运行，`terminal="new"` 在 Windows 新终端中重新执行当前脚本或模块。新终端模式启动后
+当前调用返回 `None`，且不接受窗口配置。
 `backend="sdl"` 必须提供 `WindowOptions`，启动时装入 SDL 驱动，结束或异常时恢复原驱动。
-两种方式都在当前线程阻塞运行；SDL 模式应从主线程启动。
+当前终端和 SDL 模式会阻塞运行；SDL 模式应从主线程启动。
 
 `WindowOptions` 的可选字段：`fallback_fonts=()`、`title="typace"`、
 `width=1000`、`height=600`、`font_size=18`。窗口宽高采用 SDL 窗口坐标，
@@ -79,6 +82,7 @@ typace/                         项目根目录
 ```powershell
 conda activate typace
 python -m samples.basic --backend terminal
+python -m samples.basic --backend terminal --new-terminal
 python -m samples.basic --backend sdl
 python -m samples.planet --backend sdl
 ```

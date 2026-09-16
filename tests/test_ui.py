@@ -1,5 +1,7 @@
 import ctypes
 import os
+import subprocess
+import sys
 import unittest
 from unittest.mock import patch
 
@@ -32,6 +34,45 @@ class WrapperTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(run(app), 42)
         app_run.assert_called_once_with()
         self.assertIs(app.driver_class, original_driver)
+
+    async def test_new_terminal_relaunches_current_entry_point(self) -> None:
+        app = Demo()
+        with patch.object(
+            sys, "orig_argv", ["python", "-m", "samples.basic", "--new-terminal"]
+        ), patch.dict(os.environ, {"TYPACE_TERMINAL_CHILD": ""}), patch(
+            "typace.ui.runner.subprocess.Popen"
+        ) as popen, patch.object(
+            app, "run"
+        ) as app_run:
+            self.assertIsNone(run(app, terminal="new"))
+
+        command = popen.call_args.args[0]
+        options = popen.call_args.kwargs
+        self.assertEqual(
+            command,
+            [sys.executable, "-m", "samples.basic", "--new-terminal"],
+        )
+        self.assertEqual(options["creationflags"], subprocess.CREATE_NEW_CONSOLE)
+        self.assertEqual(options["env"]["TYPACE_TERMINAL_CHILD"], "1")
+        app_run.assert_not_called()
+
+    async def test_new_terminal_child_runs_in_place(self) -> None:
+        app = Demo()
+        with patch.dict(os.environ, {"TYPACE_TERMINAL_CHILD": "1"}), patch.object(
+            app, "run", return_value=42
+        ) as app_run:
+            self.assertEqual(run(app, terminal="new"), 42)
+            self.assertNotIn("TYPACE_TERMINAL_CHILD", os.environ)
+        app_run.assert_called_once_with()
+
+    async def test_sdl_rejects_terminal_mode(self) -> None:
+        with self.assertRaisesRegex(ValueError, "requires backend='terminal'"):
+            run(
+                Demo(),
+                backend="sdl",
+                terminal="new",
+                window=WindowOptions("font.ttf"),
+            )
 
     async def test_sdl_runner_restores_driver_on_failure(self) -> None:
         from typace.ui.backends.sdl.driver import SDLDriver

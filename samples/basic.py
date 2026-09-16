@@ -31,14 +31,17 @@ class Demo(App[None]):
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--backend", choices=("terminal", "sdl"), default="terminal")
+    parser.add_argument("--new-terminal", action="store_true")
     parser.add_argument(
         "--font",
         default=str(Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts/consola.ttf"),
     )
     args = parser.parse_args()
+    if args.new_terminal and args.backend != "terminal":
+        parser.error("--new-terminal requires --backend terminal")
     fallback = Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts/msyh.ttc"
     if args.backend == "terminal":
-        run(Demo())
+        run(Demo(), terminal="new" if args.new_terminal else "current")
     else:
         run(
             Demo(),
