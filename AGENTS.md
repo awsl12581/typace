@@ -1,0 +1,52 @@
+# typace 开发约束
+
+本文件适用于仓库根目录及其所有子目录。
+
+## 项目与 Python 环境
+
+- 项目代码必须写入本目录的相关模块，不得在其他目录维护替代实现。
+- 使用已有 Conda 环境 `typace` 运行、测试、安装依赖和执行 Python 工具。
+- 已验证 Conda 环境 `typace` 使用 Python 3.14.7。
+- 优先使用 `conda run -n typace ...`；若 Conda 不在 PATH 中，先激活 `typace` 环境再使用其中的 `python`。不得改用系统 Python、uv Python、新建 venv 或 Codex 附带的 Python 验证项目。
+- 先检查该环境和已安装开发工具，复用现有依赖。工具缺失时应明确说明，不得通过换解释器掩盖问题。
+
+## Pylance 类型检查
+
+- Pylance 是代码质量约束；编辑器须选择 Conda `typace` 解释器，类型检查至少使用 `basic`，已有更严格配置时遵循更严格配置。
+- 新增或修改的公开接口须有类型标注，修复改动引入的 Pylance 类型错误及无法解析的导入。
+- 不得通过关闭检查、降低级别或滥用 `Any` / `type: ignore` 隐藏错误。
+- 命令行可用 Pyright 检查同一解释器下的代码，作为补充验证；必须如实区分 Pyright CLI 结果与实际 Pylance 编辑器诊断。
+
+## Black 格式化
+
+- 所有新增、修改的 Python 文件必须使用 Black 格式化，并通过 `black --check`。
+- 遵循项目现有 Black 配置；没有配置时使用 Black 默认格式。仅格式化本次改动相关文件。
+- Black 也必须由 Conda `typace` 的 Python 执行；可复用已安装 VS Code Black Formatter 扩展的 bundled/libs，工具缺失不得冒称检查通过。
+
+## UI 模块边界与验证
+
+- `typace.ui` 只封装现有库：使用 Textual 的组件、布局、CSS、焦点和事件系统，不自建 Canvas/Cell、组件树或布局引擎。
+- 应用直接继承 Textual 的 `App`。wrapper 公共入口仅为 `typace.ui.run` 和 `WindowOptions`；不再包装或重复导出 Textual 的应用和组件类型。
+- 公共入口负责选择后端与启动，窗口配置是纯数据，SDL 驱动负责窗口生命周期与事件适配，渲染器负责字体和 OpenGL 绘制。实现类放在独立模块，不在工厂函数中嵌套整个实现。
+- 终端端使用 Textual 原生驱动；图形端使用 SDL3 + OpenGL 3.3 Core 自定义 Textual 驱动。ANSI 解析与屏幕状态交给 pyte，字形交给 FreeType，OpenGL 调用交给 ModernGL。
+- 两端运行同一份 Textual 应用，只切换 backend。字符与像素坐标转换、字体和窗口生命周期属于图形驱动；业务和数值计算不放入 wrapper。
+- 改动须验证原生 Textual 组件交互；图形驱动改动还须执行真实 SDL/OpenGL 测试（设置 `TYPACE_TEST_SDL=1`），不能用 headless 或 mock 测试声称图形端已验证。
+- Python 包放在仓库根目录下的 `typace/`。示例放在 `samples/`，测试放在 `tests/`；`README.md`、`requirements.txt` 放在仓库根目录，不放在 UI 模块中。
+- 示例和测试命令均从项目根目录执行：
+  `conda run -n typace python -m unittest discover -s tests -v`；
+  `conda run --no-capture-output -n typace python -m samples.basic --backend sdl`。
+
+## 上位替代与接口设计
+
+- 当一个已确认需要的上位功能能够完整覆盖现有功能时，必须将旧功能的调用方、测试和文档全部迁移到上位功能，并删除旧实现、旧接口和旧路径。
+- 完整替代后不得保留兼容层、别名、双实现、双入口或新旧逻辑分支；不能被完整覆盖的行为不属于上位替代，应先明确需求边界。
+- 上位替代不能反向扩张需求：不得为了形成上位方案而加入当前任务不需要、没有实际调用方或本不应该存在的功能。
+- 接口应简单、直观、职责单一，名称、参数、默认值、返回值和生命周期应符合使用者对该领域的自然心智模型。
+- 调用方应能直接取得并传入接口所需参数；不得要求调用方经过无必要的查找、转换、包装、配置拼装或中间对象构造流程。
+- 判断接口是否合理时，以典型调用代码是否自然易懂为准，不以内部实现方便或预留未来扩展为理由增加复杂度。
+
+## Git 提交规范
+
+- 提交信息必须使用格式：`【改动】xxxx【原因】xxxx【具体实现】xxxx`。
+- 一事一议：同一个功能及其必要的代码、测试和文档应合并为一次提交。
+- 多个不同功能必须拆分为不同提交，每个提交只包含对应功能的改动。
