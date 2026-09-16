@@ -7,8 +7,9 @@ from unittest.mock import patch
 
 from textual.widgets import Button, Input, Label
 
-from typace.ui import WindowOptions, run
 from samples.basic import Demo
+from typace.config import DEFAULT_FONT
+from typace.ui import WindowOptions, run
 
 
 class WrapperTests(unittest.IsolatedAsyncioTestCase):
@@ -35,6 +36,7 @@ class WrapperTests(unittest.IsolatedAsyncioTestCase):
         app_run.assert_called_once_with()
         self.assertIs(app.driver_class, original_driver)
 
+    @unittest.skipUnless(sys.platform == "win32", "new terminal is Windows-only")
     async def test_new_terminal_relaunches_current_entry_point(self) -> None:
         app = Demo()
         with patch.object(
@@ -52,7 +54,9 @@ class WrapperTests(unittest.IsolatedAsyncioTestCase):
             command,
             [sys.executable, "-m", "samples.basic", "--new-terminal"],
         )
-        self.assertEqual(options["creationflags"], subprocess.CREATE_NEW_CONSOLE)
+        self.assertEqual(
+            options["creationflags"], getattr(subprocess, "CREATE_NEW_CONSOLE")
+        )
         self.assertEqual(options["env"]["TYPACE_TERMINAL_CHILD"], "1")
         app_run.assert_not_called()
 
@@ -113,6 +117,7 @@ class SDLTests(unittest.TestCase):
         text_frames: list[str] = []
         windows = []
         cell_size = [0, 0]
+        resized_pixel_size = [0, 0]
         original_create = sdl.SDL_CreateWindow
         original_draw = ScreenRenderer.draw
 
@@ -169,6 +174,26 @@ class SDLTests(unittest.TestCase):
 
             def click_button(self) -> None:
                 region = self.query_one(Button).region
+                window_width, window_height = ctypes.c_int(), ctypes.c_int()
+                pixel_width, pixel_height = ctypes.c_int(), ctypes.c_int()
+                sdl.SDL_GetWindowSize(
+                    windows[0], ctypes.byref(window_width), ctypes.byref(window_height)
+                )
+                sdl.SDL_GetWindowSizeInPixels(
+                    windows[0], ctypes.byref(pixel_width), ctypes.byref(pixel_height)
+                )
+                x = (
+                    (region.x + 2)
+                    * cell_size[0]
+                    * window_width.value
+                    / pixel_width.value
+                )
+                y = (
+                    (region.y + 1)
+                    * cell_size[1]
+                    * window_height.value
+                    / pixel_height.value
+                )
                 for kind in (
                     sdl.SDL_EVENT_MOUSE_BUTTON_DOWN,
                     sdl.SDL_EVENT_MOUSE_BUTTON_UP,
@@ -176,12 +201,17 @@ class SDLTests(unittest.TestCase):
                     event = sdl.SDL_Event()
                     event.type = kind
                     event.button.button = 1
-                    event.button.x = (region.x + 2) * cell_size[0]
-                    event.button.y = (region.y + 1) * cell_size[1]
+                    event.button.x = x
+                    event.button.y = y
                     sdl.SDL_PushEvent(ctypes.byref(event))
 
             def resize_window(self) -> None:
                 sdl.SDL_SetWindowSize(windows[0], 820, 520)
+                width, height = ctypes.c_int(), ctypes.c_int()
+                sdl.SDL_GetWindowSizeInPixels(
+                    windows[0], ctypes.byref(width), ctypes.byref(height)
+                )
+                resized_pixel_size[:] = [width.value, height.value]
 
             def finish(self) -> None:
                 self.final_value = self.query_one(Input).value
@@ -191,8 +221,7 @@ class SDLTests(unittest.TestCase):
         app = Smoke()
         original_driver = app.driver_class
         window = WindowOptions(
-            "C:/Windows/Fonts/consola.ttf",
-            fallback_fonts=("C:/Windows/Fonts/msyh.ttc",),
+            str(DEFAULT_FONT),
             width=960,
             height=640,
         )
@@ -203,7 +232,7 @@ class SDLTests(unittest.TestCase):
         self.assertIs(app.driver_class, original_driver)
         self.assertEqual(app.return_code, 0)
         self.assertGreater(len(frames), 1)
-        self.assertIn((820, 520), frames)
+        self.assertIn(tuple(resized_pixel_size), frames)
         self.assertTrue(any("x中文" in frame for frame in text_frames))
         self.assertEqual(app.final_value, "x中文")
         self.assertEqual(app.final_label, "x中文")

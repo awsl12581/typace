@@ -1,12 +1,11 @@
 """Run the same Textual UI in a terminal or an SDL window."""
 
 import argparse
-import os
-from pathlib import Path
 
 from textual.app import App, ComposeResult
 from textual.widgets import Button, Footer, Input, Label
 
+from typace.config import DEFAULT_FONT
 from typace.ui import WindowOptions, run
 
 
@@ -34,12 +33,11 @@ def main() -> None:
     parser.add_argument("--new-terminal", action="store_true")
     parser.add_argument(
         "--font",
-        default=str(Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts/consola.ttf"),
+        default=str(DEFAULT_FONT),
     )
     args = parser.parse_args()
     if args.new_terminal and args.backend != "terminal":
         parser.error("--new-terminal requires --backend terminal")
-    fallback = Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts/msyh.ttc"
     if args.backend == "terminal":
         run(Demo(), terminal="new" if args.new_terminal else "current")
     else:
@@ -48,7 +46,6 @@ def main() -> None:
             backend="sdl",
             window=WindowOptions(
                 font=args.font,
-                fallback_fonts=(str(fallback),) if fallback.exists() else (),
             ),
         )
 

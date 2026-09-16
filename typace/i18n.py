@@ -1,0 +1,155 @@
+"""Application text catalog."""
+
+from typing import Literal
+
+type Locale = Literal["zh_CN", "en_US"]
+
+DEFAULT_LOCALE: Locale = "zh_CN"
+LOCALE_OPTIONS: tuple[tuple[str, Locale], ...] = (
+    ("简体中文", "zh_CN"),
+    ("English", "en_US"),
+)
+
+_MESSAGES: dict[Locale, dict[str, str]] = {
+    "zh_CN": {
+        "app.quit": "退出",
+        "app.settings": "设置",
+        "app.previous_panel": "上一面板",
+        "app.next_panel": "下一面板",
+        "panel.simulation": "模拟控制",
+        "panel.camera": "视图控制",
+        "panel.focus": "聚焦",
+        "panel.time": "时间",
+        "panel.speed": "倍率",
+        "panel.state": "状态",
+        "panel.view": "视角",
+        "panel.zoom": "缩放",
+        "panel.pan": "平移",
+        "panel.navigation": "[ / ]  面板 {current}/{total}",
+        "state.paused": "已暂停",
+        "state.running": "运行中",
+        "shortcut.pause": "空格  暂停 / 继续",
+        "shortcut.warp": ", / .  减速 / 加速",
+        "shortcut.focus": "Tab / Shift+Tab  切换星体",
+        "shortcut.system": "G  返回系统视图",
+        "shortcut.view": "V  切换视角",
+        "shortcut.zoom": "+ / -  缩放",
+        "shortcut.pan": "方向键  平移",
+        "shortcut.mouse": "滚轮缩放 · 点击聚焦",
+        "shortcut.settings": "Esc  设置",
+        "shortcut.quit": "Ctrl+Q  退出",
+        "settings.title": "设置",
+        "settings.language": "界面语言",
+        "settings.elapsed_days": "相对 J2000 天数",
+        "settings.warp": "时间倍率",
+        "settings.paused": "暂停模拟",
+        "settings.panels": "浮动面板",
+        "settings.simulation_panel": "模拟控制面板",
+        "settings.camera_panel": "视图控制面板",
+        "settings.apply": "应用",
+        "settings.cancel": "取消",
+        "settings.invalid_days": "请输入有效的天数",
+        "view.top": "俯视",
+        "view.oblique": "斜视",
+        "view.side": "侧视",
+        "system.sol": "太阳系",
+        "body.sun": "太阳",
+        "body.mercury": "水星",
+        "body.venus": "金星",
+        "body.earth": "地球",
+        "body.moon": "月球",
+        "body.mars": "火星",
+        "body.phobos": "火卫一",
+        "body.deimos": "火卫二",
+        "body.jupiter": "木星",
+        "body.io": "木卫一",
+        "body.europa": "木卫二",
+        "body.ganymede": "木卫三",
+        "body.callisto": "木卫四",
+        "body.saturn": "土星",
+        "body.titan": "土卫六",
+        "body.uranus": "天王星",
+        "body.neptune": "海王星",
+        "body.triton": "海卫一",
+    },
+    "en_US": {
+        "app.quit": "Quit",
+        "app.settings": "Settings",
+        "app.previous_panel": "Previous panel",
+        "app.next_panel": "Next panel",
+        "panel.simulation": "Simulation",
+        "panel.camera": "Camera",
+        "panel.focus": "Focus",
+        "panel.time": "Time",
+        "panel.speed": "Speed",
+        "panel.state": "State",
+        "panel.view": "View",
+        "panel.zoom": "Zoom",
+        "panel.pan": "Pan",
+        "panel.navigation": "[ / ]  Panel {current}/{total}",
+        "state.paused": "Paused",
+        "state.running": "Running",
+        "shortcut.pause": "Space  Pause / resume",
+        "shortcut.warp": ", / .  Slower / faster",
+        "shortcut.focus": "Tab / Shift+Tab  Change body",
+        "shortcut.system": "G  System view",
+        "shortcut.view": "V  Change view",
+        "shortcut.zoom": "+ / -  Zoom",
+        "shortcut.pan": "Arrow keys  Pan",
+        "shortcut.mouse": "Wheel zoom · Click to focus",
+        "shortcut.settings": "Esc  Settings",
+        "shortcut.quit": "Ctrl+Q  Quit",
+        "settings.title": "Settings",
+        "settings.language": "Language",
+        "settings.elapsed_days": "Days from J2000",
+        "settings.warp": "Time speed",
+        "settings.paused": "Pause simulation",
+        "settings.panels": "Floating panels",
+        "settings.simulation_panel": "Simulation panel",
+        "settings.camera_panel": "Camera panel",
+        "settings.apply": "Apply",
+        "settings.cancel": "Cancel",
+        "settings.invalid_days": "Enter a valid number of days",
+        "view.top": "Top",
+        "view.oblique": "Oblique",
+        "view.side": "Side",
+        "system.sol": "Solar System",
+        "body.sun": "Sun",
+        "body.mercury": "Mercury",
+        "body.venus": "Venus",
+        "body.earth": "Earth",
+        "body.moon": "Moon",
+        "body.mars": "Mars",
+        "body.phobos": "Phobos",
+        "body.deimos": "Deimos",
+        "body.jupiter": "Jupiter",
+        "body.io": "Io",
+        "body.europa": "Europa",
+        "body.ganymede": "Ganymede",
+        "body.callisto": "Callisto",
+        "body.saturn": "Saturn",
+        "body.titan": "Titan",
+        "body.uranus": "Uranus",
+        "body.neptune": "Neptune",
+        "body.triton": "Triton",
+    },
+}
+
+
+def translate(locale: Locale, key: str, **values: object) -> str:
+    """Return one formatted UI message from the shared catalog."""
+    return _MESSAGES[locale][key].format(**values)
+
+
+def body_name(locale: Locale, body_id: str, fallback: str) -> str:
+    """Translate a catalog body name while allowing third-party systems."""
+    return _MESSAGES[locale].get(f"body.{body_id}", fallback)
+
+
+def parse_locale(value: object) -> Locale | None:
+    """Validate a locale value received from a UI control."""
+    if value == "zh_CN":
+        return "zh_CN"
+    if value == "en_US":
+        return "en_US"
+    return None
