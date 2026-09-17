@@ -30,6 +30,10 @@ from typace.celestial.view import (
     CelestialSystemView,
 )
 from typace.celestial.rendering import (
+    DISTANT_BODY_FAR_MARKER,
+    DISTANT_BODY_FAR_MAX_RADIUS_PX,
+    DISTANT_BODY_MID_MARKER,
+    DISTANT_BODY_MID_MAX_RADIUS_PX,
     OBLIQUE_BASIS,
     SELECTION_COLOR,
     BrailleRaster,
@@ -172,6 +176,7 @@ class SolarSystemInteractionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(view.selected_body, view.system.body("mars"))
             await pilot.press("g")
             self.assertIsNone(view.selected_body)
+            self.assertIn(DISTANT_BODY_FAR_MARKER, view.render().plain)
             await pilot.press("+")
             self.assertEqual(view.zoom, initial_zoom * ZOOM_STEP)
             scale, vertical_scale = view._projection_scale(columns, rows)
@@ -374,6 +379,44 @@ class CelestialRenderingTests(unittest.TestCase):
         self.assertEqual(
             [call.args[1].id for call in orbit.call_args_list], ["earth", "moon"]
         )
+
+    def test_planet_marker_changes_with_projected_size(self) -> None:
+        system = load_solar_system()
+        snapshot = state_at(system, 0.0)
+        earth = system.body("earth")
+        cases = (
+            (DISTANT_BODY_FAR_MAX_RADIUS_PX / 2.0, DISTANT_BODY_FAR_MARKER),
+            (
+                (DISTANT_BODY_FAR_MAX_RADIUS_PX + DISTANT_BODY_MID_MAX_RADIUS_PX) / 2.0,
+                DISTANT_BODY_MID_MARKER,
+            ),
+            (DISTANT_BODY_MID_MAX_RADIUS_PX * 2.0, None),
+        )
+
+        for projected_radius, marker in cases:
+            with self.subTest(projected_radius=projected_radius):
+                scene = render_system(
+                    snapshot,
+                    20,
+                    10,
+                    snapshot.positions[earth.id],
+                    projected_radius / earth.radius_m,
+                    TOP_BASIS,
+                    None,
+                    0.0,
+                    1.0,
+                    0.0,
+                )
+                center_character = scene.text.plain.splitlines()[5][10]
+
+                if marker is None:
+                    self.assertNotIn(
+                        center_character,
+                        (DISTANT_BODY_FAR_MARKER, DISTANT_BODY_MID_MARKER),
+                    )
+                else:
+                    self.assertEqual(center_character, marker)
+                self.assertEqual(scene.body_cells[(10, 5)], earth.id)
 
     def test_full_braille_cell_blends_material_boundary(self) -> None:
         raster = BrailleRaster(1, 1)

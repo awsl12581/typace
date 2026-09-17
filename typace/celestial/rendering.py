@@ -53,6 +53,12 @@ SELECTION_SEGMENT_COUNT = 4
 SELECTION_ARC_FRACTION = 0.32
 SELECTION_ARC_STEPS = 8
 SELECTION_ROTATION_SECONDS = 2.4
+# Orbiting bodies smaller than one Braille sub-pixel use two core-ring levels
+# so their position remains readable without suggesting visible surface detail.
+DISTANT_BODY_FAR_MAX_RADIUS_PX = 0.25
+DISTANT_BODY_MID_MAX_RADIUS_PX = 1.0
+DISTANT_BODY_FAR_MARKER = "⊙"
+DISTANT_BODY_MID_MARKER = "◉"
 # At the maximum 200 px disk radius this moves a surface point by at most
 # 0.04 px, while allowing many low-warp frames to share one texture raster.
 DISK_DIRECTION_QUANTUM = 0.0002
@@ -152,6 +158,7 @@ class BrailleRaster:
         self.owners: NDArray[np.object_] = np.full(
             (self.height, self.width), None, dtype=object
         )
+        self.markers: dict[tuple[int, int], str] = {}
 
     def set(
         self,
@@ -194,6 +201,15 @@ class BrailleRaster:
             return int(color[0]), int(color[1]), int(color[2])
         return None
 
+    def mark(self, x: int, y: int, marker: str, color: RGB, owner: str | None) -> None:
+        if not (0 <= x < self.width and 0 <= y < self.height):
+            return
+        column, row = x // 2, y // 4
+        self.markers[(column, row)] = marker
+        for marker_y in range(row * 4, row * 4 + 4):
+            for marker_x in range(column * 2, column * 2 + 2):
+                self.set(marker_x, marker_y, color, owner)
+
     def to_scene(self) -> Scene:
         body_cells: dict[tuple[int, int], str] = {}
         occupied_cells = self.occupied.reshape(self.rows, 4, self.columns, 2).transpose(
@@ -223,6 +239,8 @@ class BrailleRaster:
         ).astype(np.uint8)
 
         character_rows = BRAILLE_CHARACTERS[bits]
+        for (column, row), marker in self.markers.items():
+            character_rows[row, column] = marker
         result = Text(
             "\n".join("".join(row) for row in character_rows.tolist()),
             style=_style(BACKGROUND),
@@ -684,6 +702,17 @@ def _pixel_radius(body: CelestialBody, scale: float, limit: int) -> int:
     return 1
 
 
+def _body_marker(body: CelestialBody, scale: float) -> str | None:
+    if body.semimajor_axis_m <= 0:
+        return None
+    projected_radius = body.radius_m * scale
+    if projected_radius < DISTANT_BODY_FAR_MAX_RADIUS_PX:
+        return DISTANT_BODY_FAR_MARKER
+    if projected_radius < DISTANT_BODY_MID_MAX_RADIUS_PX:
+        return DISTANT_BODY_MID_MARKER
+    return None
+
+
 def _disk(
     projector: Projector,
     body: CelestialBody,
@@ -942,18 +971,27 @@ def render_system(
         )
         radius = _pixel_radius(body, scale, radius_limit)
         _rings(projector, body, position, False)
-        _disk(
-            projector,
-            body,
-            position,
-            parent_position,
-            light_position,
-            rotation_seconds,
-            radius,
-            disk_raster_cache,
-            texture_atlas_cache,
-            body.id != selected_id,
-        )
+        marker = _body_marker(body, scale)
+        if marker is not None:
+            projector.raster.mark(
+                *projector.project(position),
+                marker,
+                body.color,
+                body.id if body.id != selected_id else None,
+            )
+        else:
+            _disk(
+                projector,
+                body,
+                position,
+                parent_position,
+                light_position,
+                rotation_seconds,
+                radius,
+                disk_raster_cache,
+                texture_atlas_cache,
+                body.id != selected_id,
+            )
         _rings(projector, body, position, True)
         if body.id == selected_id:
             _selection_ring(projector, position, radius, selection_seconds)
