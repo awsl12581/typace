@@ -5,7 +5,7 @@ import argparse
 from textual.app import App, ComposeResult
 from textual.widgets import Button, Footer, Input, Label
 
-from typace.config import DEFAULT_FONT
+from typace.config.ui import DEFAULT_FONT
 from typace.ui import WindowOptions, run
 
 

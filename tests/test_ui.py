@@ -8,7 +8,7 @@ from unittest.mock import patch
 from textual.widgets import Button, Input, Label
 
 from samples.basic import Demo
-from typace.config import DEFAULT_FONT
+from typace.config.ui import DEFAULT_FONT
 from typace.ui import WindowOptions, run
 from typace.ui.backends.sdl.driver import SDL_EVENT_POLL_SECONDS
 

@@ -2,8 +2,8 @@
 
 import argparse
 
-from typace.config import DEFAULT_FALLBACK_FONTS, DEFAULT_FONT
 from typace.application import TyPaceApp
+from typace.config.ui import DEFAULT_FALLBACK_FONTS, DEFAULT_FONT
 from typace.ui import WindowOptions, run
 
 

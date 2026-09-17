@@ -48,7 +48,7 @@ from typace.celestial.rendering import (
     prepare_texture_atlases,
     render_system,
 )
-from typace.config import DEFAULT_FALLBACK_FONTS, DEFAULT_FONT
+from typace.config.ui import DEFAULT_FALLBACK_FONTS, DEFAULT_FONT
 from typace.solar_system import load_solar_system
 
 

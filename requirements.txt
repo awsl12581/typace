@@ -4,3 +4,6 @@ PySDL3>=0.9.12b1,<0.10
 moderngl>=5.12,<6
 freetype-py>=2.5,<3
 numpy>=2,<3
+astropy>=8,<9
+lamberthub>=1,<2
+scipy>=1.18,<2

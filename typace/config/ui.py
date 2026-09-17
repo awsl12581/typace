@@ -1,8 +1,8 @@
-"""Application startup configuration."""
+"""Window and font configuration for the Textual backends."""
 
 from pathlib import Path
 
-DEFAULT_FONT = Path(__file__).resolve().parents[1] / "assets/fonts/seguisym.ttf"
+DEFAULT_FONT = Path(__file__).resolve().parents[2] / "assets/fonts/seguisym.ttf"
 
 _SYSTEM_CJK_FONT_CANDIDATES = (
     Path("/System/Library/Fonts/STHeiti Medium.ttc"),
