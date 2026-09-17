@@ -4,12 +4,14 @@ from dataclasses import dataclass
 from math import atan2, cos, pi, radians, sin, sqrt
 from typing import Mapping
 
+import numpy as np
+
 from typace.celestial.model import CelestialBody, CelestialSystem, Vec3
+from typace.physics.frames import perifocal_to_inertial_matrix
+from typace.physics.kepler import solve_eccentric_anomaly
 
 DAY_SECONDS = 86_400.0
 TAU = 2.0 * pi
-KEPLER_TOLERANCE = 1e-12
-KEPLER_MAX_ITERATIONS = 32
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,18 +60,9 @@ def mean_anomaly(body: CelestialBody, elapsed_seconds: float) -> float:
 
 
 def solve_kepler(mean: float, eccentricity: float) -> float:
-    """Solve M = E - e sin(E) with Newton-Raphson iteration."""
-    normalized = (mean + pi) % TAU - pi
-    anomaly = normalized + eccentricity * sin(normalized)
-    for _ in range(KEPLER_MAX_ITERATIONS):
-        derivative = 1.0 - eccentricity * cos(anomaly)
-        if derivative == 0:
-            break
-        correction = (anomaly - eccentricity * sin(anomaly) - normalized) / derivative
-        anomaly -= correction
-        if abs(correction) < KEPLER_TOLERANCE:
-            break
-    return anomaly
+    """Solve through the shared SciPy-backed production implementation."""
+
+    return solve_eccentric_anomaly(mean, eccentricity)
 
 
 def true_anomaly(eccentric_anomaly: float, eccentricity: float) -> float:
@@ -87,24 +80,13 @@ def position_at_true_anomaly(elements: OrbitElements, anomaly: float) -> Vec3:
     perifocal_x = radius * cos(anomaly)
     perifocal_y = radius * sin(anomaly)
 
-    node_cos = cos(elements.ascending_node_rad)
-    node_sin = sin(elements.ascending_node_rad)
-    periapsis_cos = cos(elements.periapsis_argument_rad)
-    periapsis_sin = sin(elements.periapsis_argument_rad)
-    inclination_cos = cos(elements.inclination_rad)
-    inclination_sin = sin(elements.inclination_rad)
-    return Vec3(
-        perifocal_x
-        * (node_cos * periapsis_cos - node_sin * periapsis_sin * inclination_cos)
-        + perifocal_y
-        * (-node_cos * periapsis_sin - node_sin * periapsis_cos * inclination_cos),
-        perifocal_x
-        * (node_sin * periapsis_cos + node_cos * periapsis_sin * inclination_cos)
-        + perifocal_y
-        * (-node_sin * periapsis_sin + node_cos * periapsis_cos * inclination_cos),
-        perifocal_x * periapsis_sin * inclination_sin
-        + perifocal_y * periapsis_cos * inclination_sin,
+    rotation = perifocal_to_inertial_matrix(
+        elements.ascending_node_rad,
+        elements.inclination_rad,
+        elements.periapsis_argument_rad,
     )
+    position = rotation @ np.asarray((perifocal_x, perifocal_y, 0.0))
+    return Vec3(float(position[0]), float(position[1]), float(position[2]))
 
 
 def relative_position(body: CelestialBody, elapsed_seconds: float) -> Vec3:
