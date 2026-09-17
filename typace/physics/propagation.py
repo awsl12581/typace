@@ -96,12 +96,15 @@ def rk4_step(
 
 def can_use_analytic_step(context: PropagationContext) -> bool:
     model = context.force_model
+    has_central_gravity = model.gravitational_parameter_m3_s2 > 0.0
     has_thrust = bool(np.linalg.norm(context.thrust_inertial_n))
     has_drag = has_drag_acceleration(
         model, context.drag_area_m2, context.drag_coefficient
     )
     has_j2 = has_j2_acceleration(model)
-    return not (has_thrust or has_drag or has_j2 or context.mass_flow_kg_s != 0.0)
+    has_numerical_force = has_thrust or has_drag or has_j2
+    has_mass_flow = context.mass_flow_kg_s != 0.0
+    return has_central_gravity and not (has_numerical_force or has_mass_flow)
 
 
 def propagate(
