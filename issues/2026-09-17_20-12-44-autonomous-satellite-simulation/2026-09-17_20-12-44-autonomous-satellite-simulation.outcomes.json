@@ -1,0 +1,25 @@
+{
+  "source": "docs/specs/2026-09-17-autonomous-satellite-simulation.md",
+  "execution_scope": "approved spec 全文",
+  "artifact_role": {"kind":"task","producer":"approved mission spec","consumers":["mission review","handoff"],"authority":"定义离线模块化多卫星仿真的完整实现和验收边界","not_authority":"规格本身不能证明实现、性能、真实图形行为或信息净化已经完成"},
+  "desired_effects": [
+    {"id":"EFFECT-001","statement":"本地 JSON 加载的地球和月球卫星在同一离线世界中持续运行。","source_ref":"docs/specs/2026-09-17-autonomous-satellite-simulation.md:12"},
+    {"id":"EFFECT-002","statement":"模块化自动驾驶与玩家直接控制共用物理、执行器和资源状态。","source_ref":"docs/specs/2026-09-17-autonomous-satellite-simulation.md:14"},
+    {"id":"EFFECT-003","statement":"终端和 SDL 完整呈现并控制卫星，真实图形路径得到验证。","source_ref":"docs/specs/2026-09-17-autonomous-satellite-simulation.md:613"},
+    {"id":"EFFECT-004","statement":"运行与交付物不访问网络，也不披露绝对路径或个人敏感信息。","source_ref":"docs/specs/2026-09-17-autonomous-satellite-simulation.md:29"}
+  ],
+  "reader_questions": [
+    {"id":"OUTCOME-001","question":"六颗附带卫星和外部卫星是否只通过本地 JSON 严格进入同一个确定性世界？","why_it_matters":"数据加载不能退化成硬编码实例或在线服务。","evidence_required":"real_e2e","scope":"目录、离线边界、历元归一化和世界创建","source_ref":"docs/specs/2026-09-17-autonomous-satellite-simulation.md:570","status":"pending"},
+    {"id":"OUTCOME-002","question":"轨道、姿态、有限推力、燃料、电力和生命周期是否由唯一物理状态与传播器驱动？","why_it_matters":"双实现会破坏模拟一致性。","evidence_required":"integration","scope":"地月 patched-conic 与执行器路径","source_ref":"docs/specs/2026-09-17-autonomous-satellite-simulation.md:578","status":"pending"},
+    {"id":"OUTCOME-003","question":"模块化自动驾驶能否完成轨道维持、双向地月转移、离轨和避碰，并允许直接接管与归还？","why_it_matters":"这是核心玩法闭环。","evidence_required":"real_e2e","scope":"导航、规划、制导、控制、执行和安全监督","source_ref":"docs/specs/2026-09-17-autonomous-satellite-simulation.md:595","status":"pending"},
+    {"id":"OUTCOME-004","question":"终端与真实 SDL/OpenGL 是否通过同一 Textual 生产路径完整呈现和操作多卫星？","why_it_matters":"图形端不能是未接线旁路。","evidence_required":"real_e2e","scope":"终端和 SDL 生产 UI","source_ref":"docs/specs/2026-09-17-autonomous-satellite-simulation.md:613","status":"pending"},
+    {"id":"OUTCOME-005","question":"64 星真实更新路径是否达到 P95 20ms 且保持确定性？","why_it_matters":"目标规模必须持续后台运行。","evidence_required":"integration","scope":"物理、自主和交会性能","source_ref":"docs/specs/2026-09-17-autonomous-satellite-simulation.md:616","status":"pending"},
+    {"id":"OUTCOME-006","question":"运行输出和交付物是否完全避免绝对路径及个人敏感信息？","why_it_matters":"本地机器和个人信息不得因诊断或数据来源泄露。","evidence_required":"integration","scope":"日志、UI、事件、快照、文档和仓库数据","source_ref":"docs/specs/2026-09-17-autonomous-satellite-simulation.md:623","status":"pending"}
+  ],
+  "decisive_result": {"question":"是否交付了加载式、离线、模块化且可自主或直接控制的地月多卫星仿真？","success_condition":"39 条 claim 全部由对应等级证据覆盖，生产接线、真实 SDL、地月闭环、性能和净化均通过。","failure_condition":"任一当前范围 claim 缺失、生产路径未接线、出现双实现、发生网络访问或泄露敏感信息。","source_refs":["docs/specs/2026-09-17-autonomous-satellite-simulation.md:12","docs/specs/2026-09-17-autonomous-satellite-simulation.md:558","docs/specs/2026-09-17-autonomous-satellite-simulation.md:568"]},
+  "blocked_claims": [
+    {"claim":"目前不能声称多卫星仿真已经实现。","reason":"当前只有批准规格和 draft ADR。","release_condition":"所有实现 issue 和最终愿景审查闭环。","source_ref":"docs/specs/2026-09-17-autonomous-satellite-simulation.md:558"},
+    {"claim":"目前不能声称真实 SDL/OpenGL 路径已验证。","reason":"尚未执行真实窗口与 GPU 帧缓冲测试。","release_condition":"TYPACE_TEST_SDL=1 真实测试留下通过证据。","source_ref":"docs/specs/2026-09-17-autonomous-satellite-simulation.md:615"},
+    {"claim":"目前不能声称满足 64 星性能和信息净化要求。","reason":"尚未运行真实基准与全出口净化验收。","release_condition":"性能和敏感信息验收均通过。","source_ref":"docs/specs/2026-09-17-autonomous-satellite-simulation.md:616"}
+  ]
+}
