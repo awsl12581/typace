@@ -21,6 +21,8 @@ import sdl3 as sdl
 
 from .renderer import ScreenRenderer
 
+SDL_EVENT_POLL_SECONDS = 1.0 / 1_000.0
+
 
 class SDLDriver(Driver):
     """Own the SDL window and adapt Textual output and input."""
@@ -78,6 +80,34 @@ class SDLDriver(Driver):
     def write(self, data: str) -> None:
         # Textual may write on another thread; pyte and GL stay on the UI thread.
         self.pending.put(data)
+        try:
+            on_ui_loop = asyncio.get_running_loop() is self._loop
+        except RuntimeError:
+            on_ui_loop = False
+        if on_ui_loop:
+            self._flush()
+        else:
+            self._loop.call_soon_threadsafe(self._wake)
+
+    def _wake(self) -> None:
+        if not self.enabled:
+            return
+        if self.handle is not None:
+            self.handle.cancel()
+        self.handle = self._loop.call_soon(self._tick)
+
+    def _flush(self) -> None:
+        while True:
+            try:
+                self.stream.feed(self.pending.get_nowait())
+                self.dirty = True
+            except Empty:
+                break
+        if self.dirty:
+            assert self.renderer is not None
+            self.renderer.draw(self.screen, *self.pixel_size)
+            sdl.SDL_GL_SwapWindow(self.window)
+            self.dirty = False
 
     def _resize(self) -> None:
         assert self.renderer is not None
@@ -219,21 +249,11 @@ class SDLDriver(Driver):
                     self._handle_mouse(event)
                 elif event.type == sdl.SDL_EVENT_WINDOW_EXPOSED:
                     self.dirty = True
-            while True:
-                try:
-                    self.stream.feed(self.pending.get_nowait())
-                    self.dirty = True
-                except Empty:
-                    break
-            if self.dirty:
-                assert self.renderer is not None
-                self.renderer.draw(self.screen, *self.pixel_size)
-                sdl.SDL_GL_SwapWindow(self.window)
-                self.dirty = False
+            self._flush()
         except Exception as error:
             self._app._handle_exception(error)
             return
-        self.handle = self._loop.call_later(1 / 60, self._tick)
+        self.handle = self._loop.call_later(SDL_EVENT_POLL_SECONDS, self._tick)
 
     def disable_input(self) -> None:
         self.enabled = False

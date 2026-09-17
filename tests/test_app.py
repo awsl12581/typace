@@ -1,4 +1,5 @@
 import hashlib
+import ctypes
 import os
 from math import sin
 from pathlib import Path
@@ -6,6 +7,7 @@ import sys
 import unittest
 from unittest.mock import patch
 
+import numpy as np
 from rich.color import Color
 from rich.style import Style
 from textual import events
@@ -22,7 +24,11 @@ from typace.celestial.orbital import (
     solve_kepler,
     state_at,
 )
-from typace.celestial.view import CelestialSystemView
+from typace.celestial.view import (
+    FRAME_INTERVAL_SECONDS,
+    ZOOM_STEP,
+    CelestialSystemView,
+)
 from typace.celestial.rendering import (
     OBLIQUE_BASIS,
     SELECTION_COLOR,
@@ -33,7 +39,9 @@ from typace.celestial.rendering import (
     _disk,
     _rings,
     _selection_ring,
+    _shade_sphere,
     _texture_colors,
+    prepare_texture_atlases,
     render_system,
 )
 from typace.config import DEFAULT_FALLBACK_FONTS, DEFAULT_FONT
@@ -91,6 +99,17 @@ class SolarSystemModelTests(unittest.TestCase):
         self.assertIs(state.system, self.system)
         self.assertEqual(state.elapsed_seconds, elapsed_seconds)
         self.assertEqual(state.positions, body_positions(self.system, elapsed_seconds))
+
+    def test_view_refreshes_every_animation_frame(self) -> None:
+        self.assertEqual(FRAME_INTERVAL_SECONDS, 1.0 / 30.0)
+        view = CelestialSystemView(self.system, selected_body_id="earth")
+        with patch.object(view, "refresh") as refresh:
+            view.advance()
+            refresh.assert_called_once_with()
+
+            view.paused = True
+            view.advance()
+            self.assertEqual(refresh.call_count, 2)
 
 
 class AppEntryPointTests(unittest.TestCase):
@@ -154,7 +173,7 @@ class SolarSystemInteractionTests(unittest.IsolatedAsyncioTestCase):
             await pilot.press("g")
             self.assertIsNone(view.selected_body)
             await pilot.press("+")
-            self.assertEqual(view.zoom, initial_zoom * 1.25)
+            self.assertEqual(view.zoom, initial_zoom * ZOOM_STEP)
             scale, vertical_scale = view._projection_scale(columns, rows)
             await pilot.press("right", "up")
             self.assertAlmostEqual(view.pan_x * scale, columns * 2 * 0.1)
@@ -255,6 +274,18 @@ class SolarSystemInteractionTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CelestialRenderingTests(unittest.TestCase):
+    def test_sphere_shading_has_light_and_curvature_depth(self) -> None:
+        moon = load_solar_system().body("moon")
+        colors = np.full((1, 3, 3), 120, dtype=np.uint8)
+        valid = np.ones((1, 3), dtype=np.bool_)
+        view_normal = np.asarray([[1.0, 1.0, 0.04]], dtype=np.float32)
+        light_cosine = np.asarray([[1.0, 0.25, 1.0]], dtype=np.float32)
+
+        shaded = _shade_sphere(moon, colors, valid, view_normal, light_cosine)
+
+        self.assertGreater(int(shaded[0, 0, 0]), int(shaded[0, 1, 0]))
+        self.assertGreater(int(shaded[0, 0, 0]), int(shaded[0, 2, 0]))
+
     def test_partial_braille_cell_keeps_bits_color_and_owner(self) -> None:
         raster = BrailleRaster(1, 1)
         raster.set(0, 0, (10, 20, 30), owner="earth")
@@ -295,6 +326,31 @@ class CelestialRenderingTests(unittest.TestCase):
 
         self.assertGreater(texture_colors.call_count, 0)
         self.assertEqual(texture_colors.call_count, len(cache))
+
+    def test_texture_atlas_avoids_polygon_work_across_zoom_levels(self) -> None:
+        system = load_solar_system()
+        snapshot = state_at(system, 0.0)
+        center = snapshot.positions["earth"]
+        atlases = prepare_texture_atlases(system)
+
+        with patch("typace.celestial.rendering._texture_colors") as texture_colors:
+            for scale in (1e-5, 2e-5):
+                render_system(
+                    snapshot,
+                    20,
+                    10,
+                    center,
+                    scale,
+                    TOP_BASIS,
+                    "earth",
+                    0.0,
+                    1.0,
+                    0.0,
+                    {},
+                    atlases,
+                )
+
+        texture_colors.assert_not_called()
 
     def test_focused_view_only_renders_relevant_orbits(self) -> None:
         system = load_solar_system()
@@ -415,7 +471,7 @@ class CelestialRenderingTests(unittest.TestCase):
                 content.append(1 if raster.owners[y, x] else 0)
         self.assertEqual(
             hashlib.sha256(content).hexdigest(),
-            "32391705702cfbb0a464f90e9b21db8858b9d8d4f881ef29184bd7943e8abf33",
+            "373194aec11c2d71ba141968cfa84f191a577698b1369b404e538e49bb85aaa3",
         )
 
 
@@ -437,7 +493,7 @@ class SolarSystemSDLTests(unittest.TestCase):
         original_create = sdl.SDL_CreateWindow
         original_draw = ScreenRenderer.draw
 
-        def create(title: bytes, width: int, height: int, flags: int):
+        def create(title, width, height, flags):
             return original_create(title, width, height, flags | sdl.SDL_WINDOW_HIDDEN)
 
         def draw(
@@ -455,7 +511,16 @@ class SolarSystemSDLTests(unittest.TestCase):
 
         class Smoke(TyPaceApp):
             def on_mount(self) -> None:
+                self.initial_zoom = self.celestial_view.zoom
+                self.set_timer(0.3, self.zoom_in)
                 self.set_timer(0.8, self.exit)
+
+            def zoom_in(self) -> None:
+                event = sdl.SDL_Event()
+                event.type = sdl.SDL_EVENT_TEXT_INPUT
+                event.text.text = b"+"
+                self.zoom_event = event
+                sdl.SDL_PushEvent(ctypes.pointer(event))
 
         application = Smoke()
         with patch.object(sdl, "SDL_CreateWindow", side_effect=create), patch.object(
@@ -474,6 +539,9 @@ class SolarSystemSDLTests(unittest.TestCase):
             )
 
         self.assertEqual(application.return_code, 0)
+        self.assertEqual(
+            application.celestial_view.zoom, application.initial_zoom * ZOOM_STEP
+        )
         self.assertGreater(application.cell_pixel_aspect_ratio, 0.6)
         self.assertLess(application.cell_pixel_aspect_ratio, 0.7)
         self.assertGreater(len(frames), 1)

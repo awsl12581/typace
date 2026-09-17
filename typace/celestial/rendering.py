@@ -20,13 +20,16 @@ from typace.celestial.model import (
 )
 from typace.celestial.orbital import (
     CelestialState,
-    elements_from_body,
+    OrbitElements,
     position_at_true_anomaly,
     true_anomaly,
 )
 
 BRAILLE_BITS = ((1, 8), (2, 16), (4, 32), (64, 128))
 BRAILLE_BIT_WEIGHTS = np.asarray(BRAILLE_BITS, dtype=np.uint16)
+BRAILLE_CHARACTERS = np.asarray(
+    tuple(" " if value == 0 else chr(0x2800 + value) for value in range(256))
+)
 TAU = 2.0 * pi
 ORBIT_SAMPLES = 256
 BODY_ORBIT_COLOR: RGB = (66, 76, 92)
@@ -35,10 +38,17 @@ SELECTION_COLOR: RGB = (238, 184, 96)
 BACKGROUND: RGB = (3, 6, 12)
 NIGHT_LIGHT = 0.18
 TERMINATOR_WIDTH = 0.15
+# Screen-space sphere shading: preserve some readable limb detail while making
+# the center-to-edge curvature visible at Braille resolution.
+LIMB_DARKENING_MIN = 0.52
+ATMOSPHERE_RIM_WIDTH = 0.28
+ATMOSPHERE_RIM_OPACITY = 0.55
 TEXTURE_MIN_RADIUS_PX = 8
+TEXTURE_ATLAS_LONGITUDE_SAMPLES = 360
+TEXTURE_ATLAS_LATITUDE_SAMPLES = 181
 RING_OUTLINE_LIMIT = 12
 # UI selection marker: four broken arcs complete one clockwise turn in 2.4 seconds.
-SELECTION_RING_MARGIN_PX = 2
+SELECTION_RING_MARGIN_PX = 4
 SELECTION_SEGMENT_COUNT = 4
 SELECTION_ARC_FRACTION = 0.32
 SELECTION_ARC_STEPS = 8
@@ -49,7 +59,7 @@ DISK_DIRECTION_QUANTUM = 0.0002
 
 type BoolArray = NDArray[np.bool_]
 type ColorArray = NDArray[np.uint8]
-type FloatArray = NDArray[np.float64]
+type FloatArray = NDArray[np.float32] | NDArray[np.float64]
 type MaterialArray = NDArray[np.uint32]
 
 
@@ -96,6 +106,15 @@ class DiskRasterEntry:
 
 
 type DiskRasterCache = dict[str, DiskRasterEntry]
+
+
+@dataclass(frozen=True, slots=True)
+class TextureAtlas:
+    colors: ColorArray
+    materials: ColorArray
+
+
+type TextureAtlasCache = dict[str, TextureAtlas]
 
 
 @lru_cache(maxsize=4096)
@@ -156,7 +175,7 @@ class BrailleRaster:
         mask: BoolArray,
         colors: ColorArray,
         materials: ColorArray,
-        owner: str,
+        owner: str | None,
     ) -> None:
         height, width = mask.shape
         color_area = self.colors[y : y + height, x : x + width]
@@ -166,7 +185,8 @@ class BrailleRaster:
         color_area[mask] = colors[mask]
         occupied_area[mask] = True
         material_area[mask] = _material_keys(materials)[mask]
-        owner_area[mask] = owner
+        if owner is not None:
+            owner_area[mask] = owner
 
     def get(self, x: int, y: int) -> RGB | None:
         if 0 <= x < self.width and 0 <= y < self.height and self.occupied[y, x]:
@@ -175,7 +195,6 @@ class BrailleRaster:
         return None
 
     def to_scene(self) -> Scene:
-        result = Text(no_wrap=True)
         body_cells: dict[tuple[int, int], str] = {}
         occupied_cells = self.occupied.reshape(self.rows, 4, self.columns, 2).transpose(
             0, 2, 1, 3
@@ -203,40 +222,59 @@ class BrailleRaster:
             color_sums[populated] / counts[populated, None]
         ).astype(np.uint8)
 
+        character_rows = BRAILLE_CHARACTERS[bits]
+        result = Text(
+            "\n".join("".join(row) for row in character_rows.tolist()),
+            style=_style(BACKGROUND),
+            no_wrap=True,
+        )
         for row in range(self.rows):
-            run = ""
-            run_style: Style | None = None
-            for column in range(self.columns):
-                bit_value = int(bits[row, column])
-                color = mean_colors[row, column]
-                style = (
-                    _style((int(color[0]), int(color[1]), int(color[2])))
-                    if bit_value
-                    else _style(BACKGROUND)
+            occupied_row = populated[row]
+            color_changes = np.any(
+                mean_colors[row, 1:] != mean_colors[row, :-1], axis=1
+            )
+            starts = np.flatnonzero(
+                occupied_row
+                & np.concatenate(((True,), ~occupied_row[:-1] | color_changes))
+            )
+            stops = (
+                np.flatnonzero(
+                    occupied_row
+                    & np.concatenate((~occupied_row[1:] | color_changes, (True,)))
                 )
-                character = chr(0x2800 + bit_value) if bit_value else " "
-                if run_style is not None and style != run_style:
-                    result.append(run, run_style)
-                    run = ""
-                run += character
-                run_style = style
+                + 1
+            )
+            text_offset = row * (self.columns + 1)
+            for start, stop in zip(starts, stops, strict=True):
+                color = mean_colors[row, start]
+                result.stylize(
+                    _style((int(color[0]), int(color[1]), int(color[2]))),
+                    text_offset + int(start),
+                    text_offset + int(stop),
+                )
 
-                owners = [
-                    owner
-                    for owner in owner_cells[row, column].flat
-                    if isinstance(owner, str)
-                ]
-                if owners:
-                    first_owner = owners[0]
-                    body_cells[(column, row)] = (
-                        first_owner
-                        if all(owner == first_owner for owner in owners[1:])
-                        else Counter(owners).most_common(1)[0][0]
-                    )
-            if run_style is not None:
-                result.append(run, run_style)
-            if row + 1 < self.rows:
-                result.append("\n")
+        flat_owner_cells = owner_cells.reshape(self.rows, self.columns, 8)
+        owner_present = flat_owner_cells != None
+        owner_counts = owner_present.sum(axis=2)
+        first_owner_indices = np.argmax(owner_present, axis=2)
+        first_owners = np.take_along_axis(
+            flat_owner_cells, first_owner_indices[..., None], axis=2
+        )[..., 0]
+        uniform_owner = np.all(
+            ~owner_present | (flat_owner_cells == first_owners[..., None]), axis=2
+        )
+        for row, column in np.argwhere(owner_counts > 0):
+            first_owner = first_owners[row, column]
+            if uniform_owner[row, column]:
+                assert isinstance(first_owner, str)
+                body_cells[(int(column), int(row))] = first_owner
+                continue
+            owners = [
+                owner
+                for owner in flat_owner_cells[row, column]
+                if isinstance(owner, str)
+            ]
+            body_cells[(int(column), int(row))] = Counter(owners).most_common(1)[0][0]
         return Scene(result, body_cells)
 
 
@@ -310,18 +348,46 @@ def _line(
         )
 
 
+@lru_cache(maxsize=128)
+def _orbit_points(
+    semimajor_axis_m: float,
+    eccentricity: float,
+    inclination_deg: float,
+    ascending_node_deg: float,
+    periapsis_argument_deg: float,
+) -> tuple[Vec3, ...]:
+    elements = OrbitElements(
+        semimajor_axis_m,
+        eccentricity,
+        radians(inclination_deg),
+        radians(ascending_node_deg),
+        radians(periapsis_argument_deg),
+    )
+    return tuple(
+        position_at_true_anomaly(
+            elements,
+            true_anomaly(TAU * sample / ORBIT_SAMPLES, eccentricity),
+        )
+        for sample in range(ORBIT_SAMPLES + 1)
+    )
+
+
 def _orbit(
     projector: Projector,
     body: CelestialBody,
     center: Vec3,
     color: RGB,
 ) -> None:
-    elements = elements_from_body(body)
     previous: tuple[float, float] | None = None
-    for sample in range(ORBIT_SAMPLES + 1):
-        eccentric_anomaly = TAU * sample / ORBIT_SAMPLES
-        anomaly = true_anomaly(eccentric_anomaly, body.eccentricity)
-        point = center + position_at_true_anomaly(elements, anomaly)
+    points = _orbit_points(
+        body.semimajor_axis_m,
+        body.eccentricity,
+        body.inclination_deg,
+        body.ascending_node_deg,
+        body.periapsis_argument_deg,
+    )
+    for offset in points:
+        point = center + offset
         projected = projector.project_float(point)
         if previous is not None:
             _line(projector.raster, previous, projected, color, 1, 4)
@@ -506,11 +572,103 @@ def _texture_colors(
         if crater.color is not None:
             colors[crater_mask] = crater.color
             materials[crater_mask] = crater.color
-    if texture.limb_tint is not None:
-        limb_mask = valid & (radius_fraction > 0.92)
-        colors[limb_mask] = texture.limb_tint
-        materials[limb_mask] = texture.limb_tint
     return colors, materials
+
+
+def _texture_atlas(body: CelestialBody) -> TextureAtlas:
+    latitude, longitude = np.broadcast_arrays(
+        np.linspace(-90.0, 90.0, TEXTURE_ATLAS_LATITUDE_SAMPLES, dtype=np.float64)[
+            :, None
+        ],
+        np.linspace(
+            -180.0,
+            180.0,
+            TEXTURE_ATLAS_LONGITUDE_SAMPLES,
+            endpoint=False,
+            dtype=np.float64,
+        )[None, :],
+    )
+    shape = latitude.shape
+    colors, materials = _texture_colors(
+        body,
+        latitude,
+        longitude,
+        np.zeros(shape, dtype=np.float64),
+        np.zeros((1, shape[1]), dtype=np.float64),
+        np.zeros((shape[0], 1), dtype=np.float64),
+        np.ones(shape, dtype=np.bool_),
+    )
+    return TextureAtlas(colors, materials)
+
+
+def prepare_texture_atlases(system: CelestialSystem) -> TextureAtlasCache:
+    """Precompute scale-independent polygon textures before interaction starts."""
+    return {
+        body.id: _texture_atlas(body)
+        for body in system.bodies
+        if body.texture is not None
+        and body.texture.star is None
+        and body.texture.regions
+    }
+
+
+def _sample_texture_atlas(
+    body: CelestialBody,
+    atlas: TextureAtlas,
+    latitude: FloatArray,
+    longitude: FloatArray,
+    radius_fraction: FloatArray,
+    valid: BoolArray,
+) -> tuple[ColorArray, ColorArray]:
+    latitude_index = np.clip(
+        np.rint(latitude + 90.0), 0, TEXTURE_ATLAS_LATITUDE_SAMPLES - 1
+    ).astype(np.intp)
+    longitude_index = np.rint((longitude + 180.0) % 360.0).astype(np.intp)
+    longitude_index %= TEXTURE_ATLAS_LONGITUDE_SAMPLES
+    colors = atlas.colors[latitude_index, longitude_index].copy()
+    materials = atlas.materials[latitude_index, longitude_index].copy()
+    return colors, materials
+
+
+def _shade_sphere(
+    body: CelestialBody,
+    colors: ColorArray,
+    valid: BoolArray,
+    view_normal: FloatArray,
+    light_cosine: FloatArray | None,
+) -> ColorArray:
+    shaded = colors.astype(np.float32)
+    light_amount: FloatArray | None = None
+    if light_cosine is not None:
+        light_amount = np.clip(
+            (light_cosine + TERMINATOR_WIDTH) / (1.0 + TERMINATOR_WIDTH),
+            0.0,
+            1.0,
+        )
+        light_amount = light_amount * light_amount * (3.0 - 2.0 * light_amount)
+        illumination = NIGHT_LIGHT + (1.0 - NIGHT_LIGHT) * light_amount
+        shaded *= illumination[..., None]
+
+    curvature = LIMB_DARKENING_MIN + (1.0 - LIMB_DARKENING_MIN) * np.sqrt(
+        np.clip(view_normal, 0.0, 1.0)
+    )
+    shaded *= curvature[..., None]
+
+    texture = body.texture
+    if texture is not None and texture.limb_tint is not None:
+        rim = np.clip(
+            (ATMOSPHERE_RIM_WIDTH - view_normal) / ATMOSPHERE_RIM_WIDTH,
+            0.0,
+            1.0,
+        )
+        if light_amount is not None:
+            rim *= 0.25 + 0.75 * light_amount
+        rim *= ATMOSPHERE_RIM_OPACITY
+        tint = np.asarray(texture.limb_tint, dtype=np.float32)
+        shaded = shaded * (1.0 - rim[..., None]) + tint * rim[..., None]
+
+    shaded[~valid] = 0.0
+    return _rounded_colors(shaded)
 
 
 def _pixel_radius(body: CelestialBody, scale: float, limit: int) -> int:
@@ -535,6 +693,8 @@ def _disk(
     rotation_seconds: float,
     radius: int,
     disk_raster_cache: DiskRasterCache | None = None,
+    texture_atlas_cache: TextureAtlasCache | None = None,
+    track_owner: bool = True,
 ) -> None:
     center_x, center_y = projector.project(position)
     raster = projector.raster
@@ -578,12 +738,12 @@ def _disk(
             cached.valid,
             cached.colors,
             cached.materials,
-            body.id,
+            body.id if track_owner else None,
         )
         return
 
-    dx = np.arange(dx_start, dx_stop + 1, dtype=np.float64)[None, :]
-    dy = np.arange(dy_start, dy_stop + 1, dtype=np.float64)[:, None]
+    dx = np.arange(dx_start, dx_stop + 1, dtype=np.float32)[None, :]
+    dy = np.arange(dy_start, dy_stop + 1, dtype=np.float32)[:, None]
     nx, ny = np.broadcast_arrays(dx / radius, -dy / vertical_radius)
     radius_fraction = nx * nx + ny * ny
     valid = radius_fraction <= 1.0
@@ -619,26 +779,33 @@ def _disk(
                 surface_x * body_x.x + surface_y * body_x.y + surface_z * body_x.z,
             )
         )
-        colors, materials = _texture_colors(
-            body, latitude, longitude, radius_fraction, dx, dy, valid
+        atlas = (
+            texture_atlas_cache.get(body.id)
+            if texture_atlas_cache is not None
+            else None
         )
+        if atlas is None:
+            colors, materials = _texture_colors(
+                body, latitude, longitude, radius_fraction, dx, dy, valid
+            )
+        else:
+            colors, materials = _sample_texture_atlas(
+                body, atlas, latitude, longitude, radius_fraction, valid
+            )
     else:
         colors = np.empty((*valid.shape, 3), dtype=np.uint8)
         colors[:] = body.color
         materials = colors.copy()
 
-    if body.body_type != "Star" and light_direction.norm():
-        cosine = (
-            surface_x * light_direction.x
-            + surface_y * light_direction.y
-            + surface_z * light_direction.z
-        )
-        blend = np.clip(
-            (cosine + TERMINATOR_WIDTH) / (2.0 * TERMINATOR_WIDTH), 0.0, 1.0
-        )
-        smooth = blend * blend * (3.0 - 2.0 * blend)
-        illumination = NIGHT_LIGHT + (1.0 - NIGHT_LIGHT) * smooth
-        colors = _rounded_colors(colors.astype(np.float64) * illumination[..., None])
+    if body.body_type != "Star":
+        light_cosine = None
+        if light_direction.norm():
+            light_cosine = (
+                surface_x * light_direction.x
+                + surface_y * light_direction.y
+                + surface_z * light_direction.z
+            )
+        colors = _shade_sphere(body, colors, valid, nz, light_cosine)
     if cache_key is not None and disk_raster_cache is not None:
         disk_raster_cache[body.id] = DiskRasterEntry(
             cache_key, valid, colors, materials
@@ -649,7 +816,7 @@ def _disk(
         valid,
         colors,
         materials,
-        body.id,
+        body.id if track_owner else None,
     )
 
 
@@ -735,6 +902,7 @@ def render_system(
     vertical_scale: float,
     selection_seconds: float,
     disk_raster_cache: DiskRasterCache | None = None,
+    texture_atlas_cache: TextureAtlasCache | None = None,
 ) -> Scene:
     system = state.system
     positions = state.positions
@@ -783,6 +951,8 @@ def render_system(
             rotation_seconds,
             radius,
             disk_raster_cache,
+            texture_atlas_cache,
+            body.id != selected_id,
         )
         _rings(projector, body, position, True)
         if body.id == selected_id:

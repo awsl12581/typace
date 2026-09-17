@@ -5,12 +5,14 @@ import subprocess
 import sys
 from typing import Literal, TypeVar
 
+from textual import screen as textual_screen
 from textual.app import App
 
 from .config import WindowOptions
 
 Result = TypeVar("Result")
 _TERMINAL_CHILD = "TYPACE_TERMINAL_CHILD"
+SDL_TEXTUAL_REFRESH_SECONDS = 1.0 / 1_000.0
 
 
 def _open_new_terminal() -> None:
@@ -60,8 +62,11 @@ def run(
     from .backends.sdl.driver import create_driver
 
     original_driver = app.driver_class
+    original_update_period = textual_screen.UPDATE_PERIOD
     app.driver_class = create_driver(window)
+    setattr(textual_screen, "UPDATE_PERIOD", SDL_TEXTUAL_REFRESH_SECONDS)
     try:
         return app.run()
     finally:
+        setattr(textual_screen, "UPDATE_PERIOD", original_update_period)
         app.driver_class = original_driver

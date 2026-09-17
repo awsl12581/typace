@@ -10,9 +10,13 @@ from textual.widgets import Button, Input, Label
 from samples.basic import Demo
 from typace.config import DEFAULT_FONT
 from typace.ui import WindowOptions, run
+from typace.ui.backends.sdl.driver import SDL_EVENT_POLL_SECONDS
 
 
 class WrapperTests(unittest.IsolatedAsyncioTestCase):
+    def test_sdl_input_poll_interval_is_interactive(self) -> None:
+        self.assertLessEqual(SDL_EVENT_POLL_SECONDS, 1.0 / 500.0)
+
     async def test_native_textual_widgets(self) -> None:
         app = Demo()
         async with app.run_test(size=(90, 30)) as pilot:
@@ -79,19 +83,25 @@ class WrapperTests(unittest.IsolatedAsyncioTestCase):
             )
 
     async def test_sdl_runner_restores_driver_on_failure(self) -> None:
+        from textual import screen as textual_screen
+
         from typace.ui.backends.sdl.driver import SDLDriver
+        from typace.ui.runner import SDL_TEXTUAL_REFRESH_SECONDS
 
         app = Demo()
         original_driver = app.driver_class
+        original_update_period = textual_screen.UPDATE_PERIOD
 
         def fail() -> None:
             self.assertTrue(issubclass(app.driver_class, SDLDriver))
+            self.assertEqual(textual_screen.UPDATE_PERIOD, SDL_TEXTUAL_REFRESH_SECONDS)
             raise RuntimeError("startup failed")
 
         with patch.object(app, "run", side_effect=fail):
             with self.assertRaisesRegex(RuntimeError, "startup failed"):
                 run(app, backend="sdl", window=WindowOptions("font.ttf"))
         self.assertIs(app.driver_class, original_driver)
+        self.assertEqual(textual_screen.UPDATE_PERIOD, original_update_period)
 
     async def test_pyte_color_names(self) -> None:
         from pyte.graphics import FG_ANSI, BG_ANSI, FG_AIXTERM, BG_AIXTERM
@@ -130,6 +140,7 @@ class SDLTests(unittest.TestCase):
 
         def draw(renderer, screen, width, height):
             original_draw(renderer, screen, width, height)
+            self.assertFalse(screen.dirty)
             frames.append((width, height))
             text_frames.append("\n".join(screen.display))
             cell_size[:] = [renderer.cell_width, renderer.cell_height]

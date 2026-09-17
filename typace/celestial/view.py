@@ -18,11 +18,15 @@ from typace.celestial.rendering import (
     Scene,
     SIDE_BASIS,
     TOP_BASIS,
+    TextureAtlasCache,
+    prepare_texture_atlases,
     render_system,
 )
 from typace.i18n import DEFAULT_LOCALE, Locale
 
-FRAME_INTERVAL_SECONDS = 1.0 / 15.0
+# 30 Hz keeps motion visually continuous while leaving enough frame budget for
+# terminal output and the measured 5-7 ms scene render cost.
+FRAME_INTERVAL_SECONDS = 1.0 / 30.0
 TIME_WARPS = (1.0, 10.0, 100.0, 1_000.0, 10_000.0, 100_000.0)
 VIEW_MODES: tuple[tuple[str, Basis], ...] = (
     ("view.top", TOP_BASIS),
@@ -73,6 +77,7 @@ class CelestialSystemView(Widget):
         self._ui_locale: Locale = DEFAULT_LOCALE
         self.last_scene = Scene(Text(), {})
         self.disk_raster_cache: DiskRasterCache = {}
+        self.texture_atlas_cache: TextureAtlasCache = prepare_texture_atlases(system)
 
     @property
     def selected_body(self) -> CelestialBody | None:
@@ -175,6 +180,7 @@ class CelestialSystemView(Widget):
             vertical_scale,
             self.selection_seconds,
             disk_raster_cache=self.disk_raster_cache,
+            texture_atlas_cache=self.texture_atlas_cache,
         )
         return self.last_scene.text
 
