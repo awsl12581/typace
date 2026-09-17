@@ -50,6 +50,12 @@ from typace.satellites.state import (
     SatelliteState,
 )
 from typace.simulation.ephemeris import EarthMoonEphemeris, ephemeris_at
+from typace.simulation.events import (
+    DestructionCause,
+    DestructionEvent,
+    locate_collision_time_s,
+    locate_destruction_time_s,
+)
 from typace.vehicle.actuators import ActuatorCommand
 from typace.vehicle.dynamics import PowerEnvironment, advance_vehicle
 from typace.vehicle.power import PowerMode
@@ -64,6 +70,7 @@ class WorldSnapshot:
     effective_time_warp: float
     time_warp_limit_reason: str | None
     satellites: tuple[SatelliteSnapshot, ...]
+    destruction_events: tuple[DestructionEvent, ...] = ()
 
     def satellite(self, satellite_id: str) -> SatelliteSnapshot:
         for satellite in self.satellites:
@@ -84,6 +91,7 @@ class SimulationWorld:
         self._selected_time_warp = 1.0
         self._effective_time_warp = 1.0
         self._time_warp_limit_reason: str | None = None
+        self._destruction_events: list[DestructionEvent] = []
 
     @classmethod
     def from_catalog(
@@ -155,6 +163,21 @@ class SimulationWorld:
             state.definition.id: _advance_state(state, ephemeris, simulation_duration_s)
             for state in frozen_states
         }
+        events = _detect_destructions(
+            tuple(self._satellites.values()),
+            updates,
+            self._elapsed_seconds,
+            simulation_duration_s,
+        )
+        destroyed_ids = {
+            satellite_id for event in events for satellite_id in event.satellite_ids
+        }
+        self._destruction_events.extend(events)
+        updates = {
+            satellite_id: state
+            for satellite_id, state in updates.items()
+            if satellite_id not in destroyed_ids
+        }
         self._satellites = updates
         self._elapsed_seconds += simulation_duration_s
         return self.snapshot()
@@ -171,6 +194,7 @@ class SimulationWorld:
             self._effective_time_warp,
             self._time_warp_limit_reason,
             satellites,
+            tuple(self._destruction_events),
         )
 
     def _limited_simulation_duration_s(self, real_duration_s: float) -> float:
@@ -352,6 +376,135 @@ def _vector3(values: np.ndarray) -> tuple[float, float, float]:
 
 def _quaternion(values: np.ndarray) -> tuple[float, float, float, float]:
     return float(values[0]), float(values[1]), float(values[2]), float(values[3])
+
+
+def _detect_destructions(
+    previous: tuple[SatelliteState, ...],
+    updates: dict[str, SatelliteState],
+    elapsed_seconds: float,
+    duration_s: float,
+) -> tuple[DestructionEvent, ...]:
+    events: list[DestructionEvent] = []
+    previous_by_id = {state.definition.id: state for state in previous}
+    for satellite_id, updated in sorted(updates.items()):
+        before = previous_by_id[satellite_id]
+        state_at = lambda time_s, first=before.translation, second=updated.translation: _linear_state(
+            first, second, time_s / duration_s
+        )
+        destruction = locate_destruction_time_s(
+            before,
+            duration_s,
+            state_at,
+            lambda state: state.velocity_m_s,
+        )
+        if destruction is not None:
+            event_time_s, cause = destruction
+            events.append(
+                DestructionEvent(
+                    f"{cause.value}-{satellite_id}-{elapsed_seconds + event_time_s:.6f}",
+                    elapsed_seconds + event_time_s,
+                    (satellite_id,),
+                    cause,
+                )
+            )
+    active = tuple(
+        state
+        for satellite_id, state in sorted(updates.items())
+        if satellite_id not in {event.satellite_ids[0] for event in events}
+    )
+    destroyed = {
+        satellite_id for event in events for satellite_id in event.satellite_ids
+    }
+    remaining = tuple(
+        state for state in previous if state.definition.id not in destroyed
+    )
+    for index, first_before in enumerate(remaining):
+        for second_before in remaining[index + 1 :]:
+            if first_before.primary_body_id != second_before.primary_body_id:
+                continue
+            first_after = updates[first_before.definition.id]
+            second_after = updates[second_before.definition.id]
+            collision_time_s = _collision_time_s(
+                first_before,
+                first_after,
+                second_before,
+                second_after,
+                duration_s,
+            )
+            if collision_time_s is None:
+                continue
+            first_id = min(first_before.definition.id, second_before.definition.id)
+            second_id = max(first_before.definition.id, second_before.definition.id)
+            events.append(
+                DestructionEvent(
+                    f"collision-{first_id}-{second_id}-{elapsed_seconds + collision_time_s:.6f}",
+                    elapsed_seconds + collision_time_s,
+                    (first_id, second_id),
+                    DestructionCause.COLLISION,
+                )
+            )
+    return tuple(
+        sorted(events, key=lambda event: (event.elapsed_seconds, event.event_id))
+    )
+
+
+def _collision_time_s(
+    first_before: SatelliteState,
+    first_after: SatelliteState,
+    second_before: SatelliteState,
+    second_after: SatelliteState,
+    duration_s: float,
+) -> float | None:
+    start_position = (
+        first_before.translation.position_m - second_before.translation.position_m
+    )
+    end_position = (
+        first_after.translation.position_m - second_after.translation.position_m
+    )
+    displacement = end_position - start_position
+    displacement_squared = float(np.dot(displacement, displacement))
+    closest_fraction = 0.0
+    if displacement_squared > 0.0:
+        closest_fraction = float(
+            np.clip(
+                -np.dot(start_position, displacement) / displacement_squared, 0.0, 1.0
+            )
+        )
+    combined_radius_m = (
+        first_before.definition.collision_radius_m
+        + second_before.definition.collision_radius_m
+    )
+    closest_distance_m = float(
+        np.linalg.norm(start_position + displacement * closest_fraction)
+    )
+    if closest_distance_m > combined_radius_m:
+        return None
+    closest_time_s = duration_s * closest_fraction
+    if closest_time_s == 0.0:
+        return 0.0
+
+    def relative_state_at(time_s: float) -> TranslationalState:
+        fraction = time_s / duration_s
+        position = start_position + displacement * fraction
+        velocity = (
+            first_before.translation.velocity_m_s
+            - second_before.translation.velocity_m_s
+        )
+        return TranslationalState(position, velocity, 1.0)
+
+    return locate_collision_time_s(closest_time_s, relative_state_at, combined_radius_m)
+
+
+def _linear_state(
+    first: TranslationalState,
+    second: TranslationalState,
+    fraction: float,
+) -> TranslationalState:
+    return TranslationalState(
+        first.position_m + (second.position_m - first.position_m) * fraction,
+        first.velocity_m_s + (second.velocity_m_s - first.velocity_m_s) * fraction,
+        first.mass_kg + (second.mass_kg - first.mass_kg) * fraction,
+    )
 
 
 def _would_overflow_queue(state: SatelliteState, command: SatelliteCommand) -> bool:

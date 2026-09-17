@@ -109,6 +109,22 @@ def can_use_analytic_step(context: PropagationContext) -> bool:
     return has_central_gravity and not (has_numerical_force or has_mass_flow)
 
 
+def can_use_analytic_state(
+    state: TranslationalState, context: PropagationContext
+) -> bool:
+    mu_m3_s2 = context.force_model.gravitational_parameter_m3_s2
+    radius_m = float(np.linalg.norm(state.position_m))
+    angular_momentum = np.cross(state.position_m, state.velocity_m_s)
+    has_orbit_plane = float(np.linalg.norm(angular_momentum)) > 0.0
+    specific_energy = (
+        float(np.dot(state.velocity_m_s, state.velocity_m_s)) / 2.0
+        - mu_m3_s2 / radius_m
+        if radius_m > 0.0
+        else 0.0
+    )
+    return radius_m > 0.0 and has_orbit_plane and specific_energy < 0.0
+
+
 def propagate(
     state: TranslationalState,
     context: PropagationContext,
@@ -123,7 +139,12 @@ def propagate(
         raise ValueError("maximum step must be positive")
     if duration_s == 0.0:
         return state
-    if allow_analytic and can_use_analytic_step(context):
+    use_analytic = (
+        allow_analytic
+        and can_use_analytic_step(context)
+        and can_use_analytic_state(state, context)
+    )
+    if use_analytic:
         advanced = analytic_kepler_step(
             CartesianState(state.position_m, state.velocity_m_s),
             context.force_model.gravitational_parameter_m3_s2,
