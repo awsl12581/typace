@@ -13,7 +13,7 @@ from textual.geometry import Size
 from textual.widgets import Input, Select, Switch
 
 from app.__main__ import main
-from typace.application import ControlPanel, SettingsScreen, TyPaceApp
+from typace.application import ControlPanel, SettingsScreen, StatusBar, TyPaceApp
 from typace.celestial.model import Vec3, load_system
 from typace.celestial.orbital import (
     DAY_SECONDS,
@@ -27,11 +27,14 @@ from typace.celestial.rendering import (
     OBLIQUE_BASIS,
     SELECTION_COLOR,
     BrailleRaster,
+    DiskRasterCache,
     Projector,
     TOP_BASIS,
     _disk,
     _rings,
     _selection_ring,
+    _texture_colors,
+    render_system,
 )
 from typace.config import DEFAULT_FALLBACK_FONTS, DEFAULT_FONT
 from typace.solar_system import load_solar_system
@@ -126,8 +129,8 @@ class SolarSystemInteractionTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
 
             output = view.render().plain
-            self.assertIn("地球", output)
             self.assertTrue(any("\u2801" <= char <= "\u28ff" for char in output))
+            self.assertIn("地球", application.query_one(StatusBar).render().plain)
 
             await pilot.mouse_down(view, offset=(2, 2))
             await pilot.hover(view, offset=(20, 2))
@@ -136,7 +139,7 @@ class SolarSystemInteractionTests(unittest.IsolatedAsyncioTestCase):
 
             initial_zoom = view.zoom
             columns = view.size.width
-            rows = view.size.height - 1
+            rows = view.size.height
             await pilot.press(".")
             self.assertEqual(view.warp, 10.0)
             await pilot.press("space")
@@ -151,7 +154,7 @@ class SolarSystemInteractionTests(unittest.IsolatedAsyncioTestCase):
             await pilot.press("g")
             self.assertIsNone(view.selected_body)
             await pilot.press("+")
-            self.assertEqual(view.zoom, initial_zoom * 1.5)
+            self.assertEqual(view.zoom, initial_zoom * 1.25)
             scale, vertical_scale = view._projection_scale(columns, rows)
             await pilot.press("right", "up")
             self.assertAlmostEqual(view.pan_x * scale, columns * 2 * 0.1)
@@ -189,7 +192,7 @@ class SolarSystemInteractionTests(unittest.IsolatedAsyncioTestCase):
             self.assertAlmostEqual(view.elapsed_seconds, 42.5 * DAY_SECONDS)
             self.assertEqual(view.warp_index, 3)
             self.assertTrue(view.paused)
-            self.assertIn("Earth", view.render().plain)
+            self.assertIn("Earth", application.query_one(StatusBar).render().plain)
             self.assertFalse(application.simulation_panel.display)
             self.assertTrue(application.camera_panel.display)
             self.assertEqual(application.selected_panel_index, 1)
@@ -221,9 +224,9 @@ class SolarSystemInteractionTests(unittest.IsolatedAsyncioTestCase):
                     view.render()
                     scene_lines = view.last_scene.text.plain.splitlines()
 
-                    self.assertEqual(view.region.width, columns)
-                    self.assertEqual(view.region.height, rows)
-                    self.assertEqual(len(scene_lines), view.size.height - 1)
+                    self.assertEqual(view.region.width, max(1, columns - 2))
+                    self.assertEqual(view.region.height, max(1, rows - 4))
+                    self.assertEqual(len(scene_lines), view.size.height)
                     self.assertTrue(
                         all(len(line) == view.size.width for line in scene_lines)
                     )
@@ -252,7 +255,71 @@ class SolarSystemInteractionTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CelestialRenderingTests(unittest.TestCase):
-    def test_full_braille_cell_preserves_material_boundary(self) -> None:
+    def test_partial_braille_cell_keeps_bits_color_and_owner(self) -> None:
+        raster = BrailleRaster(1, 1)
+        raster.set(0, 0, (10, 20, 30), owner="earth")
+        raster.set(1, 3, (30, 40, 50), owner="earth")
+
+        scene = raster.to_scene()
+
+        self.assertEqual(scene.text.plain, chr(0x2800 + 1 + 128))
+        self.assertEqual(scene.body_cells, {(0, 0): "earth"})
+        style = scene.text.spans[0].style
+        assert isinstance(style, Style)
+        self.assertEqual(style.color, Color.from_rgb(20, 30, 40))
+
+    def test_textured_disk_raster_is_reused_between_stable_frames(self) -> None:
+        system = load_solar_system()
+        snapshot = state_at(system, 0.0)
+        center = snapshot.positions["earth"]
+        cache: DiskRasterCache = {}
+
+        with patch(
+            "typace.celestial.rendering._texture_colors",
+            wraps=_texture_colors,
+        ) as texture_colors:
+            for _ in range(2):
+                render_system(
+                    snapshot,
+                    20,
+                    10,
+                    center,
+                    1e-5,
+                    TOP_BASIS,
+                    "earth",
+                    0.0,
+                    1.0,
+                    0.0,
+                    cache,
+                )
+
+        self.assertGreater(texture_colors.call_count, 0)
+        self.assertEqual(texture_colors.call_count, len(cache))
+
+    def test_focused_view_only_renders_relevant_orbits(self) -> None:
+        system = load_solar_system()
+        snapshot = state_at(system, 0.0)
+        center = snapshot.positions["earth"]
+
+        with patch("typace.celestial.rendering._orbit") as orbit:
+            render_system(
+                snapshot,
+                20,
+                10,
+                center,
+                1e-9,
+                TOP_BASIS,
+                "earth",
+                0.0,
+                1.0,
+                0.0,
+            )
+
+        self.assertEqual(
+            [call.args[1].id for call in orbit.call_args_list], ["earth", "moon"]
+        )
+
+    def test_full_braille_cell_blends_material_boundary(self) -> None:
         raster = BrailleRaster(1, 1)
         ocean = (10, 40, 90)
         land = (90, 140, 40)
@@ -263,11 +330,11 @@ class CelestialRenderingTests(unittest.TestCase):
 
         scene = raster.to_scene()
 
-        self.assertEqual(scene.text.plain, "\u28b8")
+        self.assertEqual(scene.text.plain, "\u28ff")
         style = scene.text.spans[0].style
         assert isinstance(style, Style)
-        self.assertEqual(style.color, Color.from_rgb(*land))
-        self.assertEqual(style.bgcolor, Color.from_rgb(*ocean))
+        self.assertEqual(style.color, Color.from_rgb(50, 90, 65))
+        self.assertEqual(style.bgcolor, Color.from_rgb(3, 6, 12))
 
     def test_lighting_variation_does_not_create_material_boundary(self) -> None:
         raster = BrailleRaster(1, 1)
@@ -325,7 +392,7 @@ class CelestialRenderingTests(unittest.TestCase):
             _rings(projector, saturn, Vec3(), False)
             self.assertGreater(line.call_count, 0)
 
-    def test_numpy_disk_matches_reference_texture(self) -> None:
+    def test_numpy_disk_matches_texture_snapshot(self) -> None:
         earth = load_solar_system().body("earth")
         raster = BrailleRaster(20, 10)
         projector = Projector(raster, Vec3(), 1.0, OBLIQUE_BASIS, 1.0)
@@ -348,7 +415,7 @@ class CelestialRenderingTests(unittest.TestCase):
                 content.append(1 if raster.owners[y, x] else 0)
         self.assertEqual(
             hashlib.sha256(content).hexdigest(),
-            "6af4eb500841057ed023099c4bc8be438999fd139961b11102b78a1d366ad5b0",
+            "32391705702cfbb0a464f90e9b21db8858b9d8d4f881ef29184bd7943e8abf33",
         )
 
 

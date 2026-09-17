@@ -10,16 +10,17 @@ from typace.celestial.model import (
     CelestialSystem,
     Vec3,
 )
-from typace.celestial.orbital import DAY_SECONDS, state_at
+from typace.celestial.orbital import state_at
 from typace.celestial.rendering import (
     Basis,
+    DiskRasterCache,
     OBLIQUE_BASIS,
     Scene,
     SIDE_BASIS,
     TOP_BASIS,
     render_system,
 )
-from typace.i18n import DEFAULT_LOCALE, Locale, body_name, translate
+from typace.i18n import DEFAULT_LOCALE, Locale
 
 FRAME_INTERVAL_SECONDS = 1.0 / 15.0
 TIME_WARPS = (1.0, 10.0, 100.0, 1_000.0, 10_000.0, 100_000.0)
@@ -32,9 +33,9 @@ MIN_FOCUS_RADIUS_M = 1_000_000.0
 BODY_RADIUS_MARGIN = 8.0
 CHILD_ORBIT_MARGIN = 1.2
 RING_MARGIN = 1.3
-# Camera actions move 10% of the viewport and change scale by 50% per press.
+# Camera actions move 10% of the viewport and change scale by 25% per press.
 PAN_STEP_FRACTION = 0.1
-ZOOM_STEP = 1.5
+ZOOM_STEP = 1.25
 MIN_ZOOM = 0.05
 MAX_ZOOM = 200.0
 # A conventional terminal cell is half as wide as it is tall, making each
@@ -71,6 +72,7 @@ class CelestialSystemView(Widget):
         self.cell_pixel_aspect_ratio = DEFAULT_TERMINAL_CELL_PIXEL_ASPECT_RATIO
         self._ui_locale: Locale = DEFAULT_LOCALE
         self.last_scene = Scene(Text(), {})
+        self.disk_raster_cache: DiskRasterCache = {}
 
     @property
     def selected_body(self) -> CelestialBody | None:
@@ -154,7 +156,7 @@ class CelestialSystemView(Widget):
 
     def render(self) -> Text:
         columns = max(1, self.size.width)
-        rows = max(1, self.size.height - 1)
+        rows = max(1, self.size.height)
         snapshot = state_at(self.system, self.elapsed_seconds)
         selected = self.selected_body
         center = snapshot.positions[selected.id] if selected is not None else Vec3()
@@ -172,28 +174,9 @@ class CelestialSystemView(Widget):
             self.elapsed_seconds,
             vertical_scale,
             self.selection_seconds,
+            disk_raster_cache=self.disk_raster_cache,
         )
-        focus_name = (
-            body_name(self._ui_locale, selected.id, selected.name)
-            if selected is not None
-            else translate(self._ui_locale, "system.sol")
-        )
-        view_name = translate(self._ui_locale, VIEW_MODES[self.view_index][0])
-        state = (
-            translate(self._ui_locale, "state.paused")
-            if self.paused
-            else f"{self.warp:g}x"
-        )
-        elapsed_days = self.elapsed_seconds / DAY_SECONDS
-        status = Text(
-            f" {focus_name}  |  {view_name}  |  {state}  |  J2000 {elapsed_days:+,.2f} d",
-            style="bold #9dc8ff on #03060c",
-            no_wrap=True,
-            overflow="crop",
-        )
-        status.append("\n")
-        status.append(self.last_scene.text)
-        return status
+        return self.last_scene.text
 
     def action_toggle_pause(self) -> None:
         self.paused = not self.paused
@@ -244,7 +227,7 @@ class CelestialSystemView(Widget):
 
     def _pan(self, horizontal: float, vertical: float) -> None:
         columns = max(1, self.size.width)
-        rows = max(1, self.size.height - 1)
+        rows = max(1, self.size.height)
         scale, vertical_scale = self._projection_scale(columns, rows)
         horizontal_distance = (
             columns * BRAILLE_COLUMNS_PER_CELL * PAN_STEP_FRACTION / scale
@@ -278,9 +261,9 @@ class CelestialSystemView(Widget):
 
     def on_mouse_down(self, event: events.MouseDown) -> None:
         offset = event.get_content_offset(self)
-        if offset is None or offset.y == 0:
+        if offset is None:
             return
-        body_id = self.last_scene.body_cells.get((offset.x, offset.y - 1))
+        body_id = self.last_scene.body_cells.get((offset.x, offset.y))
         if body_id is None:
             return
         self.selected_index = next(

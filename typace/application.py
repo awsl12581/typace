@@ -34,8 +34,62 @@ CONTROL_PANEL_REFRESH_SECONDS = 0.25
 FLOATING_PANEL_WIDTH = 36
 FLOATING_PANEL_MARGIN = 2
 FLOATING_PANEL_STACK_OFFSET = 4
+STATUS_REFRESH_SECONDS = 0.25
 
 type PanelKind = Literal["simulation", "camera"]
+
+
+class StatusBar(Static):
+    """Compact application and simulation status shown above the scene."""
+
+    def __init__(self, view: CelestialSystemView, locale: Locale) -> None:
+        super().__init__(id="status-bar")
+        self.view = view
+        self._ui_locale: Locale = locale
+
+    def on_mount(self) -> None:
+        self.set_interval(STATUS_REFRESH_SECONDS, self.refresh)
+
+    def set_locale(self, locale: Locale) -> None:
+        self._ui_locale = locale
+        self.refresh()
+
+    def render(self) -> Text:
+        selected = self.view.selected_body
+        focus_name = (
+            body_name(self._ui_locale, selected.id, selected.name)
+            if selected is not None
+            else translate(self._ui_locale, "system.sol")
+        )
+        state = (
+            translate(self._ui_locale, "state.paused")
+            if self.view.paused
+            else f"warp {self.view.warp:g}x"
+        )
+        elapsed_days = self.view.elapsed_seconds / DAY_SECONDS
+        left = f" typace  -  {self.view.system.name}  -  focus: {focus_name}"
+        right = (
+            f"J2000 {elapsed_days:+,.2f} d   {state}   "
+            f"[Esc] {translate(self._ui_locale, 'app.settings')} "
+        )
+        result = Text(left, style="bold #68d5ff", no_wrap=True)
+        result.append(" " * max(2, self.size.width - result.cell_len - len(right)))
+        result.append(right, style="#9fb0bf")
+        result.truncate(self.size.width, overflow="crop", pad=True)
+        return result
+
+
+def _hint_text(locale: Locale) -> str:
+    return "  ·  ".join(
+        translate(locale, key)
+        for key in (
+            "shortcut.view",
+            "shortcut.zoom",
+            "shortcut.pan",
+            "shortcut.pause",
+            "shortcut.settings",
+        )
+    )
 
 
 class ControlPanel(Static):
@@ -96,12 +150,6 @@ class ControlPanel(Static):
                 f"{translate(self._ui_locale, 'panel.time')}:  {self.view.elapsed_seconds / DAY_SECONDS:+,.2f} d",
                 f"{translate(self._ui_locale, 'panel.speed')}:  {self.view.warp:g}x",
                 f"{translate(self._ui_locale, 'panel.state')}:  {translate(self._ui_locale, state_key)}",
-                "",
-                translate(self._ui_locale, "shortcut.pause"),
-                translate(self._ui_locale, "shortcut.warp"),
-                translate(self._ui_locale, "shortcut.focus"),
-                translate(self._ui_locale, "shortcut.system"),
-                translate(self._ui_locale, "shortcut.settings"),
             )
         else:
             view_name = translate(self._ui_locale, VIEW_MODES[self.view.view_index][0])
@@ -109,13 +157,6 @@ class ControlPanel(Static):
                 f"{translate(self._ui_locale, 'panel.view')}:  {view_name}",
                 f"{translate(self._ui_locale, 'panel.zoom')}:  {self.view.zoom:.2f}x",
                 f"{translate(self._ui_locale, 'panel.pan')}:  {self.view.pan_x:.2g}, {self.view.pan_y:.2g}",
-                "",
-                translate(self._ui_locale, "shortcut.view"),
-                translate(self._ui_locale, "shortcut.zoom"),
-                translate(self._ui_locale, "shortcut.pan"),
-                translate(self._ui_locale, "shortcut.mouse"),
-                translate(self._ui_locale, "shortcut.settings"),
-                translate(self._ui_locale, "shortcut.quit"),
             )
         return Text("\n".join(lines), style="#c8d7e8")
 
@@ -278,11 +319,26 @@ class TyPaceApp(App[None]):
 
     ALLOW_SELECT = False
     CSS = """
-    Screen { background: #03060c; }
+    Screen { background: #020407; }
+    #status-bar {
+        dock: top;
+        height: 1;
+        background: #05090d;
+    }
     #workspace {
         width: 100%;
-        height: 100%;
+        height: 1fr;
+        border: solid #37cdf5;
+        background: #03060c;
         layers: scene panels selected-panel;
+    }
+    #hint-strip {
+        dock: bottom;
+        width: 100%;
+        height: 1;
+        padding: 0 1;
+        color: #6f7d88;
+        background: #05090d;
     }
     CelestialSystemView {
         layer: scene;
@@ -294,16 +350,17 @@ class TyPaceApp(App[None]):
         position: absolute;
         width: 36;
         max-width: 96%;
-        height: 14;
-        padding: 1 2;
-        border: solid #36718f;
-        background: #07101b 94%;
+        padding: 0 1;
+        border: solid #37cdf5;
+        background: #05090d 96%;
         color: #c8d7e8;
     }
+    #simulation-panel { height: 7; }
+    #camera-panel { height: 6; }
     .floating-panel.selected {
         layer: selected-panel;
-        border: double #ff4090;
-        background: #101523 97%;
+        border: solid #eeb860;
+        background: #101722 97%;
     }
     .panel-visibility-setting { height: 3; }
     .panel-visibility-setting Label { width: 1fr; content-align: left middle; }
@@ -323,10 +380,14 @@ class TyPaceApp(App[None]):
         )
         self.camera_panel = ControlPanel(self.celestial_view, self._ui_locale, "camera")
         self.control_panels = (self.simulation_panel, self.camera_panel)
+        self.status_bar = StatusBar(self.celestial_view, self._ui_locale)
+        self.hint_strip = Label(_hint_text(self._ui_locale), id="hint-strip")
         self.selected_panel_index: int | None = 0
 
     def compose(self) -> ComposeResult:
+        yield self.status_bar
         yield Container(self.celestial_view, *self.control_panels, id="workspace")
+        yield self.hint_strip
 
     def on_mount(self) -> None:
         self._apply_cell_pixel_aspect_ratio()
@@ -403,6 +464,8 @@ class TyPaceApp(App[None]):
             self.celestial_view.focus()
             return
         self._ui_locale = result.locale
+        self.status_bar.set_locale(result.locale)
+        self.hint_strip.update(_hint_text(result.locale))
         self.celestial_view.set_locale(result.locale)
         self.celestial_view.set_simulation(
             elapsed_seconds=result.elapsed_seconds,

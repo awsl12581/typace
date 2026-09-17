@@ -26,22 +26,26 @@ from typace.celestial.orbital import (
 )
 
 BRAILLE_BITS = ((1, 8), (2, 16), (4, 32), (64, 128))
+BRAILLE_BIT_WEIGHTS = np.asarray(BRAILLE_BITS, dtype=np.uint16)
 TAU = 2.0 * pi
 ORBIT_SAMPLES = 256
 BODY_ORBIT_COLOR: RGB = (66, 76, 92)
 SELECTED_ORBIT_COLOR: RGB = (116, 178, 214)
-SELECTION_COLOR: RGB = (255, 64, 144)
+SELECTION_COLOR: RGB = (238, 184, 96)
 BACKGROUND: RGB = (3, 6, 12)
 NIGHT_LIGHT = 0.18
 TERMINATOR_WIDTH = 0.15
 TEXTURE_MIN_RADIUS_PX = 8
 RING_OUTLINE_LIMIT = 12
 # UI selection marker: four broken arcs complete one clockwise turn in 2.4 seconds.
-SELECTION_RING_MARGIN_PX = 3
+SELECTION_RING_MARGIN_PX = 2
 SELECTION_SEGMENT_COUNT = 4
-SELECTION_ARC_FRACTION = 0.58
+SELECTION_ARC_FRACTION = 0.32
 SELECTION_ARC_STEPS = 8
 SELECTION_ROTATION_SECONDS = 2.4
+# At the maximum 200 px disk radius this moves a surface point by at most
+# 0.04 px, while allowing many low-warp frames to share one texture raster.
+DISK_DIRECTION_QUANTUM = 0.0002
 
 type BoolArray = NDArray[np.bool_]
 type ColorArray = NDArray[np.uint8]
@@ -71,6 +75,29 @@ class Scene:
     body_cells: dict[tuple[int, int], str]
 
 
+@dataclass(frozen=True, slots=True)
+class DiskRasterKey:
+    radius: int
+    vertical_radius: int
+    bounds: tuple[int, int, int, int]
+    basis: Basis
+    body_x: tuple[int, int, int]
+    body_y: tuple[int, int, int]
+    axis: tuple[int, int, int]
+    light: tuple[int, int, int]
+
+
+@dataclass(slots=True)
+class DiskRasterEntry:
+    key: DiskRasterKey
+    valid: BoolArray
+    colors: ColorArray
+    materials: ColorArray
+
+
+type DiskRasterCache = dict[str, DiskRasterEntry]
+
+
 @lru_cache(maxsize=4096)
 def _style(foreground: RGB, background: RGB = BACKGROUND) -> Style:
     return Style(
@@ -87,15 +114,6 @@ def _material_keys(colors: ColorArray) -> MaterialArray:
     values = colors.astype(np.uint32)
     return (1 + (values[..., 0] << 16) + (values[..., 1] << 8) + values[..., 2]).astype(
         np.uint32
-    )
-
-
-def _mean_color(colors: list[RGB]) -> RGB:
-    count = len(colors)
-    return (
-        round(sum(color[0] for color in colors) / count),
-        round(sum(color[1] for color in colors) / count),
-        round(sum(color[2] for color in colors) / count),
     )
 
 
@@ -159,72 +177,55 @@ class BrailleRaster:
     def to_scene(self) -> Scene:
         result = Text(no_wrap=True)
         body_cells: dict[tuple[int, int], str] = {}
+        occupied_cells = self.occupied.reshape(self.rows, 4, self.columns, 2).transpose(
+            0, 2, 1, 3
+        )
+        color_cells = self.colors.reshape(self.rows, 4, self.columns, 2, 3).transpose(
+            0, 2, 1, 3, 4
+        )
+        owner_cells = self.owners.reshape(self.rows, 4, self.columns, 2).transpose(
+            0, 2, 1, 3
+        )
+        counts = occupied_cells.sum(axis=(2, 3), dtype=np.uint8)
+        bits = np.sum(
+            occupied_cells * BRAILLE_BIT_WEIGHTS,
+            axis=(2, 3),
+            dtype=np.uint16,
+        )
+        color_sums = np.sum(
+            color_cells * occupied_cells[..., None],
+            axis=(2, 3),
+            dtype=np.uint32,
+        )
+        mean_colors = np.zeros((self.rows, self.columns, 3), dtype=np.uint8)
+        populated = counts > 0
+        mean_colors[populated] = np.rint(
+            color_sums[populated] / counts[populated, None]
+        ).astype(np.uint8)
+
         for row in range(self.rows):
+            run = ""
+            run_style: Style | None = None
             for column in range(self.columns):
-                pixels: list[tuple[int, RGB, int]] = []
-                owners: list[str] = []
-                for dot_y, bit_row in enumerate(BRAILLE_BITS):
-                    for dot_x, bit in enumerate(bit_row):
-                        x = column * 2 + dot_x
-                        y = row * 4 + dot_y
-                        if self.occupied[y, x]:
-                            color = self.colors[y, x]
-                            pixels.append(
-                                (
-                                    bit,
-                                    (int(color[0]), int(color[1]), int(color[2])),
-                                    int(self.materials[y, x]),
-                                )
-                            )
-                        owner = self.owners[y, x]
-                        if isinstance(owner, str):
-                            owners.append(owner)
-                if len(pixels) == len(BRAILLE_BITS) * len(BRAILLE_BITS[0]):
-                    first_material = pixels[0][2]
-                    one_material = all(
-                        material == first_material for _, _, material in pixels[1:]
-                    )
-                    if one_material:
-                        result.append(
-                            chr(0x28FF),
-                            _style(_mean_color([color for _, color, _ in pixels])),
-                        )
-                    else:
-                        material_counts = Counter(material for _, _, material in pixels)
-                        dominant = min(
-                            material_counts,
-                            key=lambda material: (
-                                -material_counts[material],
-                                material,
-                            ),
-                        )
-                        foreground_pixels = [
-                            (bit, color)
-                            for bit, color, material in pixels
-                            if material != dominant
-                        ]
-                        bits = sum(bit for bit, _ in foreground_pixels)
-                        foreground = _mean_color(
-                            [color for _, color in foreground_pixels]
-                        )
-                        background = _mean_color(
-                            [
-                                color
-                                for _, color, material in pixels
-                                if material == dominant
-                            ]
-                        )
-                        result.append(
-                            chr(0x2800 + bits), _style(foreground, background)
-                        )
-                elif pixels:
-                    bits = sum(bit for bit, _, _ in pixels)
-                    result.append(
-                        chr(0x2800 + bits),
-                        _style(_mean_color([color for _, color, _ in pixels])),
-                    )
-                else:
-                    result.append(" ", _style(BACKGROUND))
+                bit_value = int(bits[row, column])
+                color = mean_colors[row, column]
+                style = (
+                    _style((int(color[0]), int(color[1]), int(color[2])))
+                    if bit_value
+                    else _style(BACKGROUND)
+                )
+                character = chr(0x2800 + bit_value) if bit_value else " "
+                if run_style is not None and style != run_style:
+                    result.append(run, run_style)
+                    run = ""
+                run += character
+                run_style = style
+
+                owners = [
+                    owner
+                    for owner in owner_cells[row, column].flat
+                    if isinstance(owner, str)
+                ]
                 if owners:
                     first_owner = owners[0]
                     body_cells[(column, row)] = (
@@ -232,6 +233,8 @@ class BrailleRaster:
                         if all(owner == first_owner for owner in owners[1:])
                         else Counter(owners).most_common(1)[0][0]
                     )
+            if run_style is not None:
+                result.append(run, run_style)
             if row + 1 < self.rows:
                 result.append("\n")
         return Scene(result, body_cells)
@@ -360,6 +363,14 @@ def _rounded_colors(values: FloatArray) -> ColorArray:
     return np.clip(np.rint(values), 0, 255).astype(np.uint8)
 
 
+def _quantized_direction(vector: Vec3) -> tuple[int, int, int]:
+    return (
+        round(vector.x / DISK_DIRECTION_QUANTUM),
+        round(vector.y / DISK_DIRECTION_QUANTUM),
+        round(vector.z / DISK_DIRECTION_QUANTUM),
+    )
+
+
 def _ellipse_mask(
     latitude: FloatArray,
     longitude: FloatArray,
@@ -380,26 +391,36 @@ def _polygon_mask(
     vertices: tuple[tuple[float, float], ...],
     candidates: BoolArray,
 ) -> BoolArray:
-    inside = np.zeros(latitude.shape, dtype=np.bool_)
+    candidate_latitude = latitude[candidates]
+    candidate_longitude = longitude[candidates]
+    candidate_inside = np.zeros(candidate_latitude.shape, dtype=np.bool_)
     previous_latitude, previous_longitude = vertices[-1]
-    previous_longitude_array = (previous_longitude - longitude + 180.0) % 360.0 - 180.0
+    previous_longitude_array = (
+        previous_longitude - candidate_longitude + 180.0
+    ) % 360.0 - 180.0
     for current_latitude, raw_longitude in vertices:
         if current_latitude == previous_latitude:
             previous_latitude = current_latitude
             previous_longitude_array = (
-                raw_longitude - longitude + 180.0
+                raw_longitude - candidate_longitude + 180.0
             ) % 360.0 - 180.0
             continue
-        current_longitude = (raw_longitude - longitude + 180.0) % 360.0 - 180.0
-        crosses = (current_latitude > latitude) != (previous_latitude > latitude)
+        current_longitude = (
+            raw_longitude - candidate_longitude + 180.0
+        ) % 360.0 - 180.0
+        crosses = (current_latitude > candidate_latitude) != (
+            previous_latitude > candidate_latitude
+        )
         longitude_at_latitude = previous_longitude_array + (
             (current_longitude - previous_longitude_array)
-            * (latitude - previous_latitude)
+            * (candidate_latitude - previous_latitude)
             / (current_latitude - previous_latitude)
         )
-        inside ^= candidates & crosses & (longitude_at_latitude > 0.0)
+        candidate_inside ^= crosses & (longitude_at_latitude > 0.0)
         previous_latitude = current_latitude
         previous_longitude_array = current_longitude
+    inside = np.zeros(latitude.shape, dtype=np.bool_)
+    inside[candidates] = candidate_inside
     return inside
 
 
@@ -453,11 +474,21 @@ def _texture_colors(
 
     for region in texture.regions:
         region_latitudes = tuple(vertex[0] for vertex in region.vertices)
+        region_longitudes = tuple(vertex[1] for vertex in region.vertices)
         candidates = (
             valid
             & (latitude >= min(region_latitudes))
             & (latitude <= max(region_latitudes))
         )
+        if max(region_longitudes) - min(region_longitudes) < 360.0:
+            longitude_origin = region_longitudes[0]
+            region_longitude_deltas = tuple(
+                (value - longitude_origin + 180.0) % 360.0 - 180.0
+                for value in region_longitudes
+            )
+            longitude_delta = (longitude - longitude_origin + 180.0) % 360.0 - 180.0
+            candidates &= longitude_delta >= min(region_longitude_deltas)
+            candidates &= longitude_delta <= max(region_longitude_deltas)
         if np.any(candidates):
             region_mask = _polygon_mask(
                 latitude, longitude, region.vertices, candidates
@@ -503,6 +534,7 @@ def _disk(
     light_position: Vec3 | None,
     rotation_seconds: float,
     radius: int,
+    disk_raster_cache: DiskRasterCache | None = None,
 ) -> None:
     center_x, center_y = projector.project(position)
     raster = projector.raster
@@ -520,6 +552,36 @@ def _disk(
         (light_position - position).unit() if light_position is not None else Vec3()
     )
     textured = body.texture is not None and radius >= TEXTURE_MIN_RADIUS_PX
+    cache_key = (
+        DiskRasterKey(
+            radius,
+            vertical_radius,
+            (dx_start, dx_stop, dy_start, dy_stop),
+            projector.basis,
+            _quantized_direction(body_x),
+            _quantized_direction(body_y),
+            _quantized_direction(axis),
+            _quantized_direction(light_direction),
+        )
+        if textured and disk_raster_cache is not None
+        else None
+    )
+    cached = (
+        disk_raster_cache.get(body.id)
+        if cache_key is not None and disk_raster_cache is not None
+        else None
+    )
+    if cached is not None and cached.key == cache_key:
+        raster.paint(
+            center_x + dx_start,
+            center_y + dy_start,
+            cached.valid,
+            cached.colors,
+            cached.materials,
+            body.id,
+        )
+        return
+
     dx = np.arange(dx_start, dx_stop + 1, dtype=np.float64)[None, :]
     dy = np.arange(dy_start, dy_stop + 1, dtype=np.float64)[:, None]
     nx, ny = np.broadcast_arrays(dx / radius, -dy / vertical_radius)
@@ -577,6 +639,10 @@ def _disk(
         smooth = blend * blend * (3.0 - 2.0 * blend)
         illumination = NIGHT_LIGHT + (1.0 - NIGHT_LIGHT) * smooth
         colors = _rounded_colors(colors.astype(np.float64) * illumination[..., None])
+    if cache_key is not None and disk_raster_cache is not None:
+        disk_raster_cache[body.id] = DiskRasterEntry(
+            cache_key, valid, colors, materials
+        )
     raster.paint(
         center_x + dx_start,
         center_y + dy_start,
@@ -668,12 +734,17 @@ def render_system(
     rotation_seconds: float,
     vertical_scale: float,
     selection_seconds: float,
+    disk_raster_cache: DiskRasterCache | None = None,
 ) -> Scene:
     system = state.system
     positions = state.positions
     raster = BrailleRaster(columns, rows)
     projector = Projector(raster, center, scale, basis, vertical_scale)
-    for body in system.bodies:
+    orbit_bodies = system.bodies
+    if selected_id is not None:
+        selected = system.body(selected_id)
+        orbit_bodies = (selected, *system.children_of(selected))
+    for body in orbit_bodies:
         if body.semimajor_axis_m <= 0:
             continue
         parent = system.parent_of(body)
@@ -711,6 +782,7 @@ def render_system(
             light_position,
             rotation_seconds,
             radius,
+            disk_raster_cache,
         )
         _rings(projector, body, position, True)
         if body.id == selected_id:
