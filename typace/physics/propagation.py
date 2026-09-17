@@ -72,10 +72,12 @@ def rk4_step(
 ) -> TranslationalState:
     """Advance translation and total mass through one classical RK4 step."""
 
-    if duration_s <= 0.0:
-        raise ValueError("step duration must be positive")
+    if duration_s == 0.0:
+        raise ValueError("step duration must be non-zero")
     if state.mass_kg <= 0.0:
         raise ValueError("mass must be positive")
+    if duration_s < 0.0 and context.mass_flow_kg_s != 0.0:
+        raise ValueError("cannot integrate mass flow backward")
     consumed_mass_kg = context.mass_flow_kg_s * duration_s
     if consumed_mass_kg >= state.mass_kg:
         raise ValueError("step would exhaust total mass")
@@ -117,10 +119,8 @@ def propagate(
 ) -> TranslationalState:
     """Advance through the sole production path with stable fixed substeps."""
 
-    if duration_s < 0.0 or maximum_step_s <= 0.0:
-        raise ValueError(
-            "duration cannot be negative and maximum step must be positive"
-        )
+    if maximum_step_s <= 0.0:
+        raise ValueError("maximum step must be positive")
     if duration_s == 0.0:
         return state
     if allow_analytic and can_use_analytic_step(context):
@@ -134,7 +134,7 @@ def propagate(
             position_m=advanced.position_m,
             velocity_m_s=advanced.velocity_m_s,
         )
-    step_count = max(1, ceil(duration_s / maximum_step_s))
+    step_count = max(1, ceil(abs(duration_s) / maximum_step_s))
     step_duration_s = duration_s / step_count
     current = state
     for _ in range(step_count):

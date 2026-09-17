@@ -1,6 +1,10 @@
 """Simulation cadence, limits, and deterministic ordering configuration."""
 
 PHYSICS_STEP_SECONDS = 1.0
+# Bounds one render-driven world update to deterministic fixed physics work.
+MAX_PHYSICS_SUBSTEPS_PER_WORLD_STEP = 16
+EPOCH_NORMALIZATION_STEP_SECONDS = 30.0
+MAX_PENDING_COMMANDS_PER_SATELLITE = 32
 MAX_SATELLITES_WITH_PERFORMANCE_GUARANTEE = 64
 UI_REFRESH_HZ = 30.0
 UPDATE_P95_BUDGET_SECONDS = 0.020
