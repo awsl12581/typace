@@ -8,12 +8,7 @@ from astropy.time import Time, TimeDelta
 import numpy as np
 
 from typace.config.physics import (
-    EARTH_EQUATORIAL_RADIUS_M,
-    EARTH_GRAVITATIONAL_PARAMETER_M3_S2,
-    EARTH_J2,
     EARTH_MEAN_RADIUS_M,
-    EARTH_ROTATION_RATE_RAD_S,
-    MOON_GRAVITATIONAL_PARAMETER_M3_S2,
     MOON_MEAN_RADIUS_M,
 )
 from typace.config.simulation import (
@@ -24,8 +19,8 @@ from typace.config.simulation import (
     TIME_WARPS,
 )
 from typace.physics.elements import CartesianState, ClassicalElements, elements_to_state
+from typace.physics.bodies import force_model_for
 from typace.physics.environment import OccludingBody
-from typace.physics.forces import ForceModel
 from typace.physics.propagation import PropagationContext, TranslationalState, propagate
 from typace.satellites.commands import (
     AvoidCollision,
@@ -192,7 +187,7 @@ class SimulationWorld:
 def _initial_state(
     definition: SatelliteDefinition, scenario_epoch: Time
 ) -> SatelliteState:
-    force_model = _force_model(definition.primary_body_id)
+    force_model = force_model_for(definition.primary_body_id)
     orbit = definition.initial_orbit
     cartesian = _cartesian_state(orbit, force_model.gravitational_parameter_m3_s2)
     vehicle = VehicleState.from_definition(definition)
@@ -244,23 +239,6 @@ def _cartesian_state(
     )
 
 
-def _force_model(primary_body_id: str) -> ForceModel:
-    if primary_body_id == "earth":
-        return ForceModel(
-            "earth",
-            EARTH_GRAVITATIONAL_PARAMETER_M3_S2,
-            EARTH_MEAN_RADIUS_M,
-            EARTH_J2,
-            EARTH_EQUATORIAL_RADIUS_M,
-            EARTH_ROTATION_RATE_RAD_S,
-        )
-    if primary_body_id == "moon":
-        return ForceModel(
-            "moon", MOON_GRAVITATIONAL_PARAMETER_M3_S2, MOON_MEAN_RADIUS_M
-        )
-    raise ValueError("unsupported primary body")
-
-
 def _advance_state(
     state: SatelliteState,
     ephemeris: EarthMoonEphemeris,
@@ -276,7 +254,7 @@ def _advance_state(
     power_environment = PowerEnvironment(
         sun.position_m,
         (
-            OccludingBody(np.zeros(3), _force_model(primary).body_radius_m),
+            OccludingBody(np.zeros(3), force_model_for(primary).body_radius_m),
             OccludingBody(other.position_m, other_radius_m),
         ),
     )
@@ -285,7 +263,7 @@ def _advance_state(
         state.definition,
         state.translation,
         state.vehicle,
-        _force_model(primary),
+        force_model_for(primary),
         command,
         power_environment,
         duration_s,
