@@ -123,6 +123,48 @@ class LifecycleTests(unittest.TestCase):
             DestructionCause.SURFACE_IMPACT,
         )
 
+    def test_dynamic_pressure_and_heat_flux_have_distinct_destruction_causes(
+        self,
+    ) -> None:
+        state = TranslationalState(
+            np.asarray((EARTH_MEAN_RADIUS_M + 100_000.0, 0.0, 0.0)),
+            np.asarray((0.0, 8_000.0, 0.0)),
+            self.satellite.translation.mass_kg,
+        )
+
+        dynamic_pressure = locate_destruction_time_s(
+            replace(
+                self.satellite,
+                definition=replace(
+                    self.satellite.definition,
+                    maximum_dynamic_pressure_pa=1.0,
+                    maximum_heat_flux_w_m2=1.0e30,
+                ),
+            ),
+            1.0,
+            lambda _: state,
+            lambda current: current.velocity_m_s,
+        )
+        heat_flux = locate_destruction_time_s(
+            replace(
+                self.satellite,
+                definition=replace(
+                    self.satellite.definition,
+                    maximum_dynamic_pressure_pa=1.0e30,
+                    maximum_heat_flux_w_m2=1.0,
+                ),
+            ),
+            1.0,
+            lambda _: state,
+            lambda current: current.velocity_m_s,
+        )
+
+        self.assertEqual(
+            dynamic_pressure,
+            (0.0, DestructionCause.DYNAMIC_PRESSURE),
+        )
+        self.assertEqual(heat_flux, (0.0, DestructionCause.HEAT_FLUX))
+
 
 if __name__ == "__main__":
     unittest.main()

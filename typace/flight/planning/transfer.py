@@ -23,11 +23,12 @@ from typace.flight.planning.burns import corrected_burn
 
 @dataclass(frozen=True, slots=True)
 class TransferTarget:
-    primary_body_id: str
-    departure_origin_position_earth_m: np.ndarray
-    departure_origin_velocity_earth_m_s: np.ndarray
-    target_body_position_earth_m: np.ndarray
-    target_body_velocity_earth_m_s: np.ndarray
+    target_primary_body_id: str
+    transfer_center_body_id: str
+    departure_origin_position_center_m: np.ndarray
+    departure_origin_velocity_center_m_s: np.ndarray
+    target_body_position_center_m: np.ndarray
+    target_body_velocity_center_m_s: np.ndarray
     insertion_position_m: np.ndarray
     flight_time_s: float
     departure_after_s: float = 0.0
@@ -47,15 +48,14 @@ def plan_transfer(
             PlanningFailureCode.MISSED_WINDOW, "departure window passed"
         )
     target_is_supported = (
-        target.primary_body_id in ("earth", "moon")
-        and target.primary_body_id != navigation.primary_body_id
+        target.target_primary_body_id != navigation.primary_body_id
         and target.flight_time_s > 0.0
     )
     target_vectors = (
-        target.departure_origin_position_earth_m,
-        target.departure_origin_velocity_earth_m_s,
-        target.target_body_position_earth_m,
-        target.target_body_velocity_earth_m_s,
+        target.departure_origin_position_center_m,
+        target.departure_origin_velocity_center_m_s,
+        target.target_body_position_center_m,
+        target.target_body_velocity_center_m_s,
         target.insertion_position_m,
     )
     vectors_are_valid = all(
@@ -66,21 +66,21 @@ def plan_transfer(
         return PlanningFailure(
             PlanningFailureCode.INVALID_TARGET, "transfer target is invalid"
         )
-    earth_model = force_model_for("earth")
-    departure_position_earth_m = (
-        target.departure_origin_position_earth_m + navigation.position_m
+    transfer_model = force_model_for(target.transfer_center_body_id)
+    departure_position_center_m = (
+        target.departure_origin_position_center_m + navigation.position_m
     )
-    departure_velocity_earth_m_s = (
-        target.departure_origin_velocity_earth_m_s + navigation.velocity_m_s
+    departure_velocity_center_m_s = (
+        target.departure_origin_velocity_center_m_s + navigation.velocity_m_s
     )
-    arrival_position_earth_m = (
-        target.target_body_position_earth_m + target.insertion_position_m
+    arrival_position_center_m = (
+        target.target_body_position_center_m + target.insertion_position_m
     )
     try:
         lambert = solve_lambert(
-            earth_model.gravitational_parameter_m3_s2,
-            departure_position_earth_m,
-            arrival_position_earth_m,
+            transfer_model.gravitational_parameter_m3_s2,
+            departure_position_center_m,
+            arrival_position_center_m,
             target.flight_time_s,
             prograde=target.prograde,
             low_path=target.low_path,
@@ -89,7 +89,7 @@ def plan_transfer(
         return PlanningFailure(
             PlanningFailureCode.UNREACHABLE, "Lambert transfer is unreachable"
         )
-    departure_delta_v = lambert.departure_velocity_m_s - departure_velocity_earth_m_s
+    departure_delta_v = lambert.departure_velocity_m_s - departure_velocity_center_m_s
     departure_burn = corrected_burn(
         navigation, definition, departure_delta_v, "transfer:departure"
     )
@@ -102,11 +102,11 @@ def plan_transfer(
     )
     departure_propellant_kg = mass_flow_kg_s * departure_burn.duration_s
     arrival_relative_velocity_m_s = (
-        lambert.arrival_velocity_m_s - target.target_body_velocity_earth_m_s
+        lambert.arrival_velocity_m_s - target.target_body_velocity_center_m_s
     )
     arrival_navigation = NavigationSolution(
         navigation.satellite_id,
-        target.primary_body_id,
+        target.target_primary_body_id,
         target.insertion_position_m,
         arrival_relative_velocity_m_s,
         navigation.mass_kg - departure_propellant_kg,
@@ -147,7 +147,7 @@ def plan_transfer(
             "combined departure and capture burns exceed reserve",
         )
     return FlightPlan(
-        f"transfer_to_{target.primary_body_id}",
+        f"transfer_to_{target.target_primary_body_id}",
         (
             departure_burn,
             CoastStep(target.flight_time_s),
@@ -155,7 +155,7 @@ def plan_transfer(
         ),
         "SOI transition and capture orbit conditions reached",
         propellant_kg,
-        target.primary_body_id,
+        target.target_primary_body_id,
     )
 
 
@@ -173,11 +173,11 @@ def _capture_delta_v_m_s(
         tangent = np.cross(reference_normal, radial)
     tangent /= float(np.linalg.norm(tangent))
     target_mu_m3_s2 = force_model_for(
-        target.primary_body_id
+        target.target_primary_body_id
     ).gravitational_parameter_m3_s2
     circular_velocity_m_s = tangent * sqrt(target_mu_m3_s2 / insertion_radius_m)
     arrival_relative_velocity_m_s = (
-        arrival_velocity_m_s - target.target_body_velocity_earth_m_s
+        arrival_velocity_m_s - target.target_body_velocity_center_m_s
     )
     return circular_velocity_m_s - arrival_relative_velocity_m_s
 

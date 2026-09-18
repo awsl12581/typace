@@ -17,6 +17,7 @@ from typace.config.simulation import (
     MAX_CATALOG_STRING_LENGTH,
 )
 from typace.privacy import safe_catalog_location, sanitize_text, sanitize_url
+from typace.solar_system import load_solar_system
 from typace.satellites.definition import (
     AutonomyDefinition,
     KeplerianDefinition,
@@ -31,8 +32,9 @@ from typace.satellites.definition import (
 )
 
 _BUNDLED_CATALOG = Path(__file__).with_name("data") / "catalog.json"
-_ALLOWED_PRIMARY_BODIES = frozenset(("earth", "moon"))
-_ALLOWED_FRAMES = frozenset(("earth_j2000", "moon_j2000"))
+_ALLOWED_PRIMARY_BODIES = frozenset(
+    body.id for body in load_solar_system().bodies if body.mass_kg > 0.0
+)
 _ALLOWED_COMMANDS = frozenset(
     (
         "maintain_orbit",
@@ -243,7 +245,10 @@ def _parse_initial_orbit(
     orbit = _mapping(data.get(key), orbit_path)
     epoch = _time(orbit, "epoch", orbit_path)
     frame = _text(orbit, "frame", orbit_path)
-    if frame not in _ALLOWED_FRAMES:
+    supported_frames = frozenset(
+        f"{body_id}_j2000" for body_id in _ALLOWED_PRIMARY_BODIES
+    )
+    if frame not in supported_frames:
         raise _InvalidField(f"{orbit_path}.frame", "is not a supported inertial frame")
     if has_vector:
         return StateVectorDefinition(
@@ -274,7 +279,9 @@ def _parse_satellite(value: object, index: int) -> SatelliteDefinition:
         raise _InvalidField(path, f"unknown fields: {', '.join(sorted(unknown))}")
     primary_body_id = _text(data, "primary_body_id", path)
     if primary_body_id not in _ALLOWED_PRIMARY_BODIES:
-        raise _InvalidField(f"{path}.primary_body_id", "must be earth or moon")
+        raise _InvalidField(
+            f"{path}.primary_body_id", "is not in the solar-system catalog"
+        )
 
     propulsion_data = _mapping(data.get("propulsion"), f"{path}.propulsion")
     propulsion = PropulsionDefinition(

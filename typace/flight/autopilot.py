@@ -10,6 +10,9 @@ from typace.satellites.commands import (
     SetApsides,
     SetInclination,
     SetOrbitAltitude,
+    TransferPrimary,
+    ReturnStableOrbit,
+    AvoidCollision,
 )
 from typace.satellites.definition import SatelliteDefinition
 from typace.satellites.state import ControlMode, SatelliteSnapshot
@@ -30,6 +33,8 @@ from typace.flight.models import (
 from typace.flight.navigation import NavigationState, update_navigation
 from typace.flight.objectives import FlightObjective
 from typace.flight.planning.orbit import plan_orbit_command
+from typace.flight.planning.avoidance import ConjunctionRisk, plan_avoidance
+from typace.flight.planning.transfer import TransferTarget, plan_transfer
 from typace.flight.safety import SafetyDecision, SafetyReason, SafetyTelemetry
 
 type OrbitCommand = MaintainOrbit | SetOrbitAltitude | SetApsides | SetInclination | Deorbit
@@ -71,12 +76,19 @@ def autopilot_step(
     *,
     objective: FlightObjective | None = None,
     planned_result: PlanningResult | None = None,
+    transfer_target: TransferTarget | None = None,
+    conjunction_risk: ConjunctionRisk | None = None,
 ) -> AutopilotOutput:
     objective_changed = objective is not None and objective != state.objective
+    navigation_primary_changed = (
+        state.navigation.solution is not None
+        and state.navigation.solution.primary_body_id != snapshot.primary_body_id
+    )
     navigation_refresh_needed = (
         state.navigation.solution is None
         or vehicle.requires_replan
         or objective_changed
+        or navigation_primary_changed
     )
     navigation_failure: PlanningFailure | None = None
     try:
@@ -107,7 +119,13 @@ def autopilot_step(
     needs_plan = objective_changed or has_no_planning_result or vehicle.requires_replan
     if needs_plan and result is None and selected_objective is not None:
         try:
-            result = _plan_objective(navigation, definition, selected_objective)
+            result = _plan_objective(
+                navigation,
+                definition,
+                selected_objective,
+                transfer_target,
+                conjunction_risk,
+            )
         except (ArithmeticError, ValueError):
             result = PlanningFailure(
                 PlanningFailureCode.UNREACHABLE,
@@ -156,6 +174,8 @@ def _plan_objective(
     navigation: NavigationState,
     definition: SatelliteDefinition,
     objective: FlightObjective,
+    transfer_target: TransferTarget | None,
+    conjunction_risk: ConjunctionRisk | None,
 ) -> PlanningResult | None:
     command = objective.command
     if isinstance(
@@ -163,6 +183,20 @@ def _plan_objective(
         MaintainOrbit | SetOrbitAltitude | SetApsides | SetInclination | Deorbit,
     ):
         return plan_orbit_command(navigation.solution, definition, command)
+    if isinstance(command, TransferPrimary | ReturnStableOrbit):
+        if transfer_target is None:
+            return PlanningFailure(
+                PlanningFailureCode.INVALID_TARGET,
+                "transfer target is unavailable",
+            )
+        return plan_transfer(navigation.solution, definition, transfer_target)
+    if isinstance(command, AvoidCollision):
+        if conjunction_risk is None:
+            return PlanningFailure(
+                PlanningFailureCode.INVALID_TARGET,
+                "conjunction risk is unavailable",
+            )
+        return plan_avoidance(navigation.solution, definition, conjunction_risk)
     return None
 
 

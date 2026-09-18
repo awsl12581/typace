@@ -169,6 +169,50 @@ class ControlTests(unittest.TestCase):
         )
         self.assertIsNotNone(autonomous.state.execution)
 
+    def test_primary_transition_refreshes_navigation_without_dropping_plan(
+        self,
+    ) -> None:
+        objective = FlightObjective(
+            "transfer",
+            ObjectivePriority.USER_COMMAND,
+            SetOrbitAltitude(20_300_000.0),
+        )
+        started = autopilot_step(
+            AutopilotState.idle(),
+            self._snapshot(ControlMode.AUTONOMOUS),
+            self.vehicle,
+            self.definition,
+            SafetyTelemetry(),
+            0.1,
+            objective=objective,
+            planned_result=self.plan,
+        )
+        lunar_snapshot = replace(
+            self._snapshot(ControlMode.AUTONOMOUS),
+            primary_body_id="moon",
+            position_m=(1_837_400.0, 0.0, 0.0),
+            velocity_m_s=(0.0, 1_600.0, 0.0),
+        )
+
+        transitioned = autopilot_step(
+            started.state,
+            lunar_snapshot,
+            self.vehicle,
+            self.definition,
+            SafetyTelemetry(),
+            0.1,
+            objective=objective,
+        )
+
+        self.assertIsNotNone(transitioned.state.navigation.solution)
+        assert transitioned.state.navigation.solution is not None
+        self.assertEqual(
+            transitioned.state.navigation.solution.primary_body_id,
+            "moon",
+        )
+        self.assertIs(transitioned.state.plan, started.state.plan)
+        self.assertIsNotNone(transitioned.state.execution)
+
 
 if __name__ == "__main__":
     unittest.main()

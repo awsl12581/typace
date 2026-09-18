@@ -17,13 +17,21 @@ from typace.satellites.commands import (
     CommandStatus,
     ManualActuation,
     ReturnAutonomousControl,
+    ReturnStableOrbit,
     SetOrbitAltitude,
     TakeManualControl,
+    TransferPrimary,
 )
-from typace.satellites.definition import KeplerianDefinition, SatelliteCatalog
+from typace.satellites.definition import (
+    KeplerianDefinition,
+    SatelliteCatalog,
+    StateVectorDefinition,
+)
 from typace.satellites.state import ControlMode
 from typace.simulation import SimulationWorld
+from typace.simulation.ephemeris import ephemeris_at
 from typace.simulation.events import DestructionCause
+from typace.simulation.world import _transition_primary
 from typace.vehicle.power import PowerMode
 
 
@@ -122,6 +130,159 @@ class SimulationWorldTests(unittest.TestCase):
         self.assertEqual(continued.pending_command_count, 0)
         self.assertEqual(continued.plan_objective_id, planned.plan_objective_id)
         self.assertLessEqual(continued.main_propellant_kg, before.main_propellant_kg)
+
+    def test_interplanetary_command_uses_catalog_transfer_center(self) -> None:
+        source = self.catalog.satellite("gps-biir-2")
+        definition = replace(
+            source,
+            id="interplanetary",
+            dry_mass_kg=1_000.0,
+            main_propellant_mass_kg=1.0e9,
+            drag_area_m2=0.0,
+            propulsion=replace(
+                source.propulsion,
+                main_thrust_n=1.0e12,
+                main_specific_impulse_s=10_000.0,
+            ),
+            autonomy=replace(
+                source.autonomy,
+                minimum_main_propellant_reserve_kg=0.0,
+            ),
+        )
+        world = SimulationWorld.from_catalog(
+            SatelliteCatalog(self.catalog.scenario_epoch, (definition,))
+        )
+
+        self.assertTrue(
+            world.submit("interplanetary", TransferPrimary("mars")).accepted
+        )
+        snapshot = world.step(1.0 / UI_REFRESH_HZ).satellite("interplanetary")
+
+        self.assertEqual(snapshot.pending_command_count, 0)
+        self.assertEqual(snapshot.plan_objective_id, "transfer_to_mars")
+        self.assertIsNone(snapshot.planning_failure)
+
+    def test_root_primary_return_reports_unavailable_parent(self) -> None:
+        source = self.catalog.satellite("gps-biir-2")
+        definition = replace(
+            source,
+            id="solar-orbiter",
+            primary_body_id="sun",
+            initial_orbit=StateVectorDefinition(
+                self.catalog.scenario_epoch,
+                "sun_j2000",
+                (1_000_000_000.0, 0.0, 0.0),
+                (0.0, 360_000.0, 0.0),
+            ),
+            drag_area_m2=0.0,
+        )
+        world = SimulationWorld.from_catalog(
+            SatelliteCatalog(self.catalog.scenario_epoch, (definition,))
+        )
+
+        self.assertTrue(world.submit("solar-orbiter", ReturnStableOrbit()).accepted)
+        snapshot = world.step(1.0 / UI_REFRESH_HZ).satellite("solar-orbiter")
+
+        self.assertEqual(snapshot.pending_command_count, 0)
+        self.assertIsNone(snapshot.plan_objective_id)
+        self.assertEqual(snapshot.planning_failure, "transfer target is unavailable")
+
+    def test_soi_transition_preserves_system_inertial_state(self) -> None:
+        world = SimulationWorld.from_catalog(self.catalog)
+        ephemeris = ephemeris_at(world.scenario_epoch)
+        state = world._satellites["iss"]
+        earth_soi_m = ephemeris.sphere_of_influence_radius_m("earth")
+        escaping = replace(
+            state,
+            translation=replace(
+                state.translation,
+                position_m=np.asarray((earth_soi_m * 1.01, 0.0, 0.0)),
+            ),
+        )
+        before_position = (
+            ephemeris.body("earth").position_m + escaping.translation.position_m
+        )
+        before_velocity = (
+            ephemeris.body("earth").velocity_m_s + escaping.translation.velocity_m_s
+        )
+
+        transitioned = _transition_primary(escaping, ephemeris)
+
+        self.assertEqual(transitioned.primary_body_id, "sun")
+        np.testing.assert_allclose(
+            ephemeris.body("sun").position_m + transitioned.translation.position_m,
+            before_position,
+        )
+        np.testing.assert_allclose(
+            ephemeris.body("sun").velocity_m_s + transitioned.translation.velocity_m_s,
+            before_velocity,
+        )
+
+    def test_conjunction_alerts_select_one_stable_yielding_satellite(self) -> None:
+        source = self.catalog.satellite("gps-biir-2")
+
+        def definition(satellite_id: str, offset_m: float, radial_speed_m_s: float):
+            return replace(
+                source,
+                id=satellite_id,
+                initial_orbit=StateVectorDefinition(
+                    self.catalog.scenario_epoch,
+                    "earth_j2000",
+                    (7_000_000.0 + offset_m, 0.0, 0.0),
+                    (radial_speed_m_s, 7_500.0, 0.0),
+                ),
+                dry_mass_kg=1_000.0,
+                main_propellant_mass_kg=10_000.0,
+                drag_area_m2=0.0,
+                propulsion=replace(
+                    source.propulsion,
+                    main_thrust_n=1_000_000.0,
+                    main_specific_impulse_s=900.0,
+                ),
+                autonomy=replace(
+                    source.autonomy,
+                    minimum_main_propellant_reserve_kg=0.0,
+                    avoidance_distance_m=1_000_000.0,
+                ),
+            )
+
+        world = SimulationWorld.from_catalog(
+            SatelliteCatalog(
+                self.catalog.scenario_epoch,
+                (definition("a", 0.0, 0.0), definition("b", 20_000.0, -20.0)),
+            )
+        )
+
+        snapshot = world.step(1.0 / UI_REFRESH_HZ)
+
+        first = snapshot.satellite("a")
+        second = snapshot.satellite("b")
+        self.assertEqual(first.conjunction_alert_ids, ("a:b",))
+        self.assertEqual(second.conjunction_alert_ids, ("a:b",))
+        self.assertNotEqual(first.plan_objective_id, "avoid_a:b")
+        self.assertEqual(second.plan_objective_id, "avoid_a:b")
+
+        insufficient = definition("b", 20_000.0, -20.0)
+        insufficient = replace(
+            insufficient,
+            autonomy=replace(
+                insufficient.autonomy,
+                minimum_main_propellant_reserve_kg=(
+                    insufficient.main_propellant_mass_kg
+                ),
+            ),
+        )
+        constrained_world = SimulationWorld.from_catalog(
+            SatelliteCatalog(
+                self.catalog.scenario_epoch,
+                (definition("a", 0.0, 0.0), insufficient),
+            )
+        )
+
+        constrained = constrained_world.step(1.0 / UI_REFRESH_HZ).satellite("b")
+
+        self.assertEqual(constrained.conjunction_alert_ids, ("a:b",))
+        self.assertIn("reserve", constrained.planning_failure or "")
 
     def test_manual_actuation_uses_main_wheel_and_rcs_resources(self) -> None:
         world = SimulationWorld.from_catalog(self.catalog)

@@ -172,6 +172,7 @@ class PlanningTests(unittest.TestCase):
             self.definition,
             TransferTarget(
                 "moon",
+                "earth",
                 np.zeros(3),
                 np.zeros(3),
                 moon_position_earth_m,
@@ -184,6 +185,7 @@ class PlanningTests(unittest.TestCase):
             moon_navigation,
             moon_definition,
             TransferTarget(
+                "earth",
                 "earth",
                 moon_position_earth_m,
                 moon_velocity_earth_m_s,

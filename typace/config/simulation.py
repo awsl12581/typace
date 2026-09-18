@@ -9,6 +9,9 @@ MAX_SATELLITES_WITH_PERFORMANCE_GUARANTEE = 64
 UI_REFRESH_HZ = 30.0
 UPDATE_P95_BUDGET_SECONDS = 0.020
 EVENT_TIME_TOLERANCE_SECONDS = 1.0e-3
+# One-hour operational screening window; long enough to react within typical
+# low-orbit periods without turning the render-driven tick into mission planning.
+CONJUNCTION_PREDICTION_HORIZON_SECONDS = 3_600.0
 MAX_CATALOG_BYTES = 4 * 1024 * 1024
 MAX_CATALOG_OBJECTS = 1_024
 MAX_CATALOG_STRING_LENGTH = 2_048

@@ -38,6 +38,8 @@ from typace.physics.propagation import (
     locate_event_time_s,
     propagate,
 )
+from typace.physics.bodies import force_model_for
+from typace.solar_system import load_solar_system
 
 TWO_BODY_RELATIVE_ENERGY_TOLERANCE = 2.0e-6
 TWO_BODY_RELATIVE_MOMENTUM_TOLERANCE = 1.0e-6
@@ -80,6 +82,13 @@ class EnvironmentTests(unittest.TestCase):
 
 
 class PropagationTests(unittest.TestCase):
+    def test_every_catalog_body_has_a_positive_force_model(self) -> None:
+        for body in load_solar_system().bodies:
+            with self.subTest(body=body.id):
+                model = force_model_for(body.id)
+                self.assertGreater(model.gravitational_parameter_m3_s2, 0.0)
+                self.assertGreater(model.body_radius_m, 0.0)
+
     def test_two_body_rk4_conserves_energy_and_momentum_for_100_periods(self) -> None:
         radius_m = 7_000_000.0
         speed_m_s = sqrt(EARTH_GRAVITATIONAL_PARAMETER_M3_S2 / radius_m)

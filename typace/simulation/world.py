@@ -1,17 +1,14 @@
 """Single-clock deterministic multi-satellite world."""
 
 from dataclasses import dataclass, replace
-from math import isfinite, radians
+from math import isfinite, pi, radians, sqrt
 from typing import cast
 
 from astropy.time import Time, TimeDelta
 import numpy as np
 
-from typace.config.physics import (
-    EARTH_MEAN_RADIUS_M,
-    MOON_MEAN_RADIUS_M,
-)
 from typace.config.simulation import (
+    CONJUNCTION_PREDICTION_HORIZON_SECONDS,
     EPOCH_NORMALIZATION_STEP_SECONDS,
     MAX_PENDING_COMMANDS_PER_SATELLITE,
     MAX_PHYSICS_SUBSTEPS_PER_WORLD_STEP,
@@ -20,9 +17,12 @@ from typace.config.simulation import (
 )
 from typace.config.vehicle import QUATERNION_NORM_TOLERANCE
 from typace.flight.autopilot import AutopilotState, autopilot_step
+from typace.flight.conjunction import ConjunctionCandidate, screen_conjunctions
 from typace.flight.execution import ExecutionStatus
 from typace.flight.manual import manual_control
 from typace.flight.objectives import FlightObjective, ObjectivePriority
+from typace.flight.planning.avoidance import ConjunctionRisk
+from typace.flight.planning.transfer import TransferTarget
 from typace.flight.safety import SafetyDecision, SafetyReason, SafetyTelemetry
 from typace.physics.elements import CartesianState, ClassicalElements, elements_to_state
 from typace.physics.bodies import force_model_for
@@ -55,7 +55,7 @@ from typace.satellites.state import (
     SatelliteSnapshot,
     SatelliteState,
 )
-from typace.simulation.ephemeris import EarthMoonEphemeris, ephemeris_at
+from typace.simulation.ephemeris import SolarSystemEphemeris, ephemeris_at
 from typace.simulation.events import (
     DestructionCause,
     DestructionEvent,
@@ -104,6 +104,7 @@ class SimulationWorld:
         self._safety_reasons = {
             satellite_id: SafetyReason.CLEAR for satellite_id in satellites
         }
+        self._conjunction_alerts = {satellite_id: () for satellite_id in satellites}
 
     @classmethod
     def from_catalog(
@@ -171,6 +172,11 @@ class SimulationWorld:
         frozen_states = tuple(
             self._satellites[satellite_id] for satellite_id in sorted(self._satellites)
         )
+        conjunctions = screen_conjunctions(
+            frozen_states, CONJUNCTION_PREDICTION_HORIZON_SECONDS
+        )
+        risks_by_satellite = _yielding_risks(conjunctions)
+        conjunction_alerts = _conjunction_alerts(frozen_states, conjunctions)
         updates: dict[str, SatelliteState] = {}
         autopilot_updates: dict[str, AutopilotState] = {}
         safety_updates: dict[str, SafetyReason] = {}
@@ -186,6 +192,8 @@ class SimulationWorld:
                     self._autopilots[satellite_id],
                     self._safety_reasons[satellite_id],
                     simulation_duration_s,
+                    ephemeris,
+                    risks_by_satellite.get(satellite_id),
                 )
                 update = _advance_state(
                     controlled_state,
@@ -193,6 +201,7 @@ class SimulationWorld:
                     decision.command,
                     simulation_duration_s,
                 )
+                update = _transition_primary(update, ephemeris)
                 controlled_update = update, autopilot, decision
             except Exception:
                 update = None
@@ -245,6 +254,9 @@ class SimulationWorld:
         self._safety_reasons = {
             satellite_id: safety_updates[satellite_id] for satellite_id in updates
         }
+        self._conjunction_alerts = {
+            satellite_id: conjunction_alerts[satellite_id] for satellite_id in updates
+        }
         self._elapsed_seconds += simulation_duration_s
         return self.snapshot()
 
@@ -254,6 +266,7 @@ class SimulationWorld:
                 self._satellites[satellite_id],
                 self._autopilots[satellite_id],
                 self._safety_reasons[satellite_id],
+                self._conjunction_alerts[satellite_id],
             )
             for satellite_id in sorted(self._satellites)
         )
@@ -335,23 +348,15 @@ def _cartesian_state(
 
 def _advance_state(
     state: SatelliteState,
-    ephemeris: EarthMoonEphemeris,
+    ephemeris: SolarSystemEphemeris,
     command: ActuatorCommand,
     duration_s: float,
 ) -> SatelliteState:
     primary = state.primary_body_id
     sun = ephemeris.relative("sun", primary)
-    other_body_id = "moon" if primary == "earth" else "earth"
-    other = ephemeris.relative(other_body_id, primary)
-    other_radius_m = (
-        MOON_MEAN_RADIUS_M if other_body_id == "moon" else EARTH_MEAN_RADIUS_M
-    )
     power_environment = PowerEnvironment(
         sun.position_m,
-        (
-            OccludingBody(np.zeros(3), force_model_for(primary).body_radius_m),
-            OccludingBody(other.position_m, other_radius_m),
-        ),
+        _occluding_bodies(ephemeris, primary),
     )
     result = advance_vehicle(
         state.definition,
@@ -385,8 +390,10 @@ def _control_request(
     autopilot: AutopilotState,
     previous_safety_reason: SafetyReason,
     duration_s: float,
+    ephemeris: SolarSystemEphemeris,
+    conjunction: ConjunctionCandidate | None,
 ) -> tuple[SatelliteState, AutopilotState, SafetyDecision]:
-    if _autopilot_is_quiescent(state, autopilot):
+    if conjunction is None and _autopilot_is_quiescent(state, autopilot):
         return (
             state,
             autopilot,
@@ -395,7 +402,7 @@ def _control_request(
                 SafetyReason.CLEAR,
             ),
         )
-    snapshot = _snapshot(state, autopilot, previous_safety_reason)
+    snapshot = _snapshot(state, autopilot, previous_safety_reason, ())
     telemetry = SafetyTelemetry()
     if state.control_mode is ControlMode.MANUAL:
         command = _manual_command(state)
@@ -410,7 +417,7 @@ def _control_request(
         )
         return state, cancelled.state, decision
 
-    objective, pending_commands = _next_objective(state, autopilot)
+    objective, pending_commands = _next_objective(state, autopilot, conjunction)
     if objective is not autopilot.objective:
         autopilot = replace(autopilot, plan=None, execution=None)
     output = autopilot_step(
@@ -421,6 +428,8 @@ def _control_request(
         telemetry,
         duration_s,
         objective=objective,
+        transfer_target=_transfer_target(state, objective, ephemeris),
+        conjunction_risk=_conjunction_risk(conjunction),
     )
     vehicle = state.vehicle
     planning_finished = (
@@ -446,6 +455,179 @@ def _autopilot_is_quiescent(state: SatelliteState, autopilot: AutopilotState) ->
     )
 
 
+def _occluding_bodies(
+    ephemeris: SolarSystemEphemeris, primary_body_id: str
+) -> tuple[OccludingBody, ...]:
+    primary = ephemeris.system.body(primary_body_id)
+    related = list(ephemeris.system.children_of(primary))
+    parent = ephemeris.system.parent_of(primary)
+    if parent is not None and parent.id != "sun":
+        related.append(parent)
+    return (
+        OccludingBody(np.zeros(3), primary.radius_m),
+        *(
+            OccludingBody(
+                ephemeris.relative(body.id, primary_body_id).position_m,
+                body.radius_m,
+            )
+            for body in related
+        ),
+    )
+
+
+def _transition_primary(
+    state: SatelliteState, ephemeris: SolarSystemEphemeris
+) -> SatelliteState:
+    current_id = state.primary_body_id
+    current_body = ephemeris.system.body(current_id)
+    current_origin = ephemeris.body(current_id)
+    system_position_m = current_origin.position_m + state.translation.position_m
+    child_entries: list[tuple[float, str]] = []
+    for child in ephemeris.system.children_of(current_body):
+        child_distance_m = float(
+            np.linalg.norm(system_position_m - ephemeris.body(child.id).position_m)
+        )
+        soi_radius_m = ephemeris.sphere_of_influence_radius_m(child.id)
+        if child_distance_m <= soi_radius_m:
+            child_entries.append((child_distance_m / soi_radius_m, child.id))
+    next_primary_id = (
+        min(child_entries)[1] if child_entries else _exited_primary(state, ephemeris)
+    )
+    if next_primary_id is None or next_primary_id == current_id:
+        return state
+    position_m, velocity_m_s = ephemeris.translate_primary(
+        state.translation.position_m,
+        state.translation.velocity_m_s,
+        current_id,
+        next_primary_id,
+    )
+    return replace(
+        state,
+        primary_body_id=next_primary_id,
+        translation=replace(
+            state.translation,
+            position_m=position_m,
+            velocity_m_s=velocity_m_s,
+        ),
+        vehicle=state.vehicle,
+    )
+
+
+def _exited_primary(
+    state: SatelliteState, ephemeris: SolarSystemEphemeris
+) -> str | None:
+    parent_id = ephemeris.parent_id(state.primary_body_id)
+    if parent_id is None:
+        return None
+    distance_m = float(np.linalg.norm(state.translation.position_m))
+    if distance_m > ephemeris.sphere_of_influence_radius_m(state.primary_body_id):
+        return parent_id
+    return state.primary_body_id
+
+
+def _transfer_target(
+    state: SatelliteState,
+    objective: FlightObjective,
+    ephemeris: SolarSystemEphemeris,
+) -> TransferTarget | None:
+    command = objective.command
+    target_id: str | None = None
+    if isinstance(command, TransferPrimary):
+        target_id = command.primary_body_id
+    elif isinstance(command, ReturnStableOrbit):
+        target_id = ephemeris.parent_id(state.primary_body_id)
+    if target_id is None or target_id == state.primary_body_id:
+        return None
+    center_id = ephemeris.common_ancestor_id(state.primary_body_id, target_id)
+    departure_origin = ephemeris.relative(state.primary_body_id, center_id)
+    target_body = ephemeris.relative(target_id, center_id)
+    departure_position_m = departure_origin.position_m + state.translation.position_m
+    arrival_direction = _arrival_direction(
+        target_body.position_m, departure_origin.position_m
+    )
+    target = ephemeris.system.body(target_id)
+    insertion_radius_m = (
+        target.radius_m + state.definition.autonomy.target_periapsis_altitude_m
+    )
+    insertion_position_m = arrival_direction * insertion_radius_m
+    transfer_radius_m = (
+        float(np.linalg.norm(departure_position_m))
+        + float(np.linalg.norm(target_body.position_m + insertion_position_m))
+    ) / 2.0
+    center_mu_m3_s2 = force_model_for(center_id).gravitational_parameter_m3_s2
+    flight_time_s = pi * sqrt(transfer_radius_m**3 / center_mu_m3_s2)
+    return TransferTarget(
+        target_id,
+        center_id,
+        departure_origin.position_m,
+        departure_origin.velocity_m_s,
+        target_body.position_m,
+        target_body.velocity_m_s,
+        insertion_position_m,
+        flight_time_s,
+    )
+
+
+def _arrival_direction(
+    target_position_m: np.ndarray, departure_position_m: np.ndarray
+) -> np.ndarray:
+    reference = target_position_m
+    if not np.any(reference):
+        reference = -departure_position_m
+    if not np.any(reference):
+        return np.asarray((1.0, 0.0, 0.0))
+    return reference / float(np.linalg.norm(reference))
+
+
+def _conjunction_id(conjunction: ConjunctionCandidate) -> str:
+    return f"{conjunction.first_id}:{conjunction.second_id}"
+
+
+def _conjunction_risk(
+    conjunction: ConjunctionCandidate | None,
+) -> ConjunctionRisk | None:
+    if conjunction is None:
+        return None
+    return ConjunctionRisk(
+        _conjunction_id(conjunction),
+        conjunction.time_to_closest_approach_s,
+        conjunction.predicted_distance_m,
+        conjunction.required_distance_m,
+    )
+
+
+def _yielding_risks(
+    conjunctions: tuple[ConjunctionCandidate, ...],
+) -> dict[str, ConjunctionCandidate]:
+    risks: dict[str, ConjunctionCandidate] = {}
+    ordered = sorted(
+        conjunctions,
+        key=lambda item: (
+            item.time_to_closest_approach_s,
+            item.first_id,
+            item.second_id,
+        ),
+    )
+    for conjunction in ordered:
+        risks.setdefault(conjunction.yielding_satellite_id, conjunction)
+    return risks
+
+
+def _conjunction_alerts(
+    states: tuple[SatelliteState, ...],
+    conjunctions: tuple[ConjunctionCandidate, ...],
+) -> dict[str, tuple[str, ...]]:
+    alerts: dict[str, list[str]] = {state.definition.id: [] for state in states}
+    for conjunction in conjunctions:
+        conjunction_id = _conjunction_id(conjunction)
+        alerts[conjunction.first_id].append(conjunction_id)
+        alerts[conjunction.second_id].append(conjunction_id)
+    return {
+        satellite_id: tuple(sorted(conjunction_ids))
+        for satellite_id, conjunction_ids in alerts.items()
+    }
+
+
 def _manual_command(state: SatelliteState) -> ManualActuation:
     for command in reversed(state.pending_commands):
         if isinstance(command, ManualActuation):
@@ -454,12 +636,31 @@ def _manual_command(state: SatelliteState) -> ManualActuation:
 
 
 def _next_objective(
-    state: SatelliteState, autopilot: AutopilotState
+    state: SatelliteState,
+    autopilot: AutopilotState,
+    conjunction: ConjunctionCandidate | None,
 ) -> tuple[FlightObjective, tuple[SatelliteCommand, ...]]:
+    if conjunction is not None:
+        conjunction_id = _conjunction_id(conjunction)
+        return (
+            FlightObjective(
+                f"avoidance-{conjunction_id}",
+                ObjectivePriority.COLLISION_AVOIDANCE,
+                AvoidCollision(conjunction_id),
+            ),
+            state.pending_commands,
+        )
     for index, command in enumerate(state.pending_commands):
         if isinstance(
             command,
-            MaintainOrbit | SetOrbitAltitude | SetApsides | SetInclination | Deorbit,
+            MaintainOrbit
+            | SetOrbitAltitude
+            | SetApsides
+            | SetInclination
+            | TransferPrimary
+            | ReturnStableOrbit
+            | Deorbit
+            | AvoidCollision,
         ):
             objective = FlightObjective(
                 f"user-{state.definition.id}-{type(command).__name__}",
@@ -511,6 +712,7 @@ def _snapshot(
     state: SatelliteState,
     autopilot: AutopilotState,
     safety_reason: SafetyReason,
+    conjunction_alert_ids: tuple[str, ...],
 ) -> SatelliteSnapshot:
     translation = state.translation
     attitude = state.vehicle.attitude
@@ -539,6 +741,7 @@ def _snapshot(
             else autopilot.planning_failure.reason
         ),
         safety_reason.value,
+        conjunction_alert_ids,
     )
 
 
@@ -752,7 +955,7 @@ def _command_is_valid(command: SatelliteCommand) -> bool:
             and 0.0 <= command.inclination_rad <= np.pi
         )
     if isinstance(command, TransferPrimary):
-        return command.primary_body_id in ("earth", "moon")
+        return _primary_body_is_supported(command.primary_body_id)
     if isinstance(command, AvoidCollision):
         return bool(command.conjunction_id)
     if isinstance(command, ManualActuation):
@@ -764,6 +967,14 @@ def _command_is_valid(command: SatelliteCommand) -> bool:
         values_are_finite = all(isfinite(value) for value in values)
         throttle_is_valid = 0.0 <= command.main_throttle <= 1.0
         return values_are_finite and throttle_is_valid
+    return True
+
+
+def _primary_body_is_supported(primary_body_id: str) -> bool:
+    try:
+        force_model_for(primary_body_id)
+    except ValueError:
+        return False
     return True
 
 

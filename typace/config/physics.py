@@ -6,6 +6,9 @@ the 3rd CGPM conventional value.
 """
 
 STANDARD_GRAVITY_M_S2 = 9.80665
+# 2022 CODATA Newtonian constant of gravitation; relative standard uncertainty
+# is 2.2e-5 and limits catalog-mass-derived gravitational parameters.
+UNIVERSAL_GRAVITATIONAL_CONSTANT_M3_KG_S2 = 6.67430e-11
 # IAU 2012 Resolution B2 exact astronomical unit definition.
 ASTRONOMICAL_UNIT_M = 149_597_870_700.0
 SOLAR_CONSTANT_W_M2 = 1361.0

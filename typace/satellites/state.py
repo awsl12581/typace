@@ -49,3 +49,4 @@ class SatelliteSnapshot:
     execution_status: str | None = None
     planning_failure: str | None = None
     safety_reason: str | None = None
+    conjunction_alert_ids: tuple[str, ...] = ()

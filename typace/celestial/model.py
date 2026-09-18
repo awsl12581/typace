@@ -101,6 +101,7 @@ class CelestialBody:
     body_type: str
     parent_id: str | None
     radius_m: float
+    mass_kg: float
     semimajor_axis_m: float
     eccentricity: float
     inclination_deg: float
@@ -162,6 +163,16 @@ def _text(data: dict[str, object], key: str, default: str = "") -> str:
     if not isinstance(value, str):
         raise ValueError(f"{key} must be text")
     return value
+
+
+def _mass_kg(data: dict[str, object], body_id: str) -> float:
+    mass = _mapping(data.get("mass"), f"{body_id}.mass")
+    value = _number(mass, "massValue")
+    exponent = _number(mass, "massExponent")
+    mass_kg = value * 10.0**exponent
+    if mass_kg <= 0.0:
+        raise ValueError(f"{body_id}: mass must be positive")
+    return mass_kg
 
 
 def parse_color(value: str, fallback: RGB = (180, 180, 180)) -> RGB:
@@ -306,6 +317,7 @@ def _body(value: object) -> CelestialBody:
         body_type=_text(data, "bodyType"),
         parent_id=parent_id,
         radius_m=_number(data, "meanRadius") * 1000.0,
+        mass_kg=_mass_kg(data, body_id),
         semimajor_axis_m=_number(data, "semimajorAxis") * 1000.0,
         eccentricity=_number(data, "eccentricity"),
         inclination_deg=_number(data, "inclination"),

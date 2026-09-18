@@ -48,6 +48,10 @@ def _screen_pair(
 ) -> ConjunctionCandidate | None:
     relative_position = first.translation.position_m - second.translation.position_m
     relative_velocity = first.translation.velocity_m_s - second.translation.velocity_m_s
+    if not (
+        np.isfinite(relative_position).all() and np.isfinite(relative_velocity).all()
+    ):
+        return None
     speed_squared = float(np.dot(relative_velocity, relative_velocity))
     closest_time_s = 0.0
     if speed_squared > 0.0:
@@ -58,13 +62,18 @@ def _screen_pair(
                 horizon_s,
             )
         )
-    first_state = _propagate(first, closest_time_s)
-    second_state = _propagate(second, closest_time_s)
-    distance_m = float(np.linalg.norm(first_state.position_m - second_state.position_m))
+    linear_distance_m = float(
+        np.linalg.norm(relative_position + relative_velocity * closest_time_s)
+    )
     required_m = (
         first.definition.autonomy.avoidance_distance_m
         + second.definition.autonomy.avoidance_distance_m
     )
+    if linear_distance_m >= required_m:
+        return None
+    first_state = _propagate(first, closest_time_s)
+    second_state = _propagate(second, closest_time_s)
+    distance_m = float(np.linalg.norm(first_state.position_m - second_state.position_m))
     if distance_m >= required_m:
         return None
     return ConjunctionCandidate(
@@ -77,6 +86,8 @@ def _screen_pair(
 
 
 def _propagate(satellite: SatelliteState, duration_s: float) -> TranslationalState:
+    if duration_s == 0.0:
+        return satellite.translation
     return propagate(
         satellite.translation,
         PropagationContext(
