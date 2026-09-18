@@ -157,6 +157,17 @@ class SolarSystemInteractionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(application.world.snapshot().satellites), 6)
             self.assertGreater(len(panel.query("ListItem")), 0)
             self.assertGreaterEqual(len(view.satellite_markers), 1)
+            view.focus_satellite(application.selected_satellite_id)
+            view.render()
+            focused_marker = next(
+                marker
+                for marker in view.satellite_markers
+                if marker.satellite_id == application.selected_satellite_id
+            )
+            self.assertEqual(focused_marker.column, view.size.width // 2)
+            self.assertEqual(focused_marker.row, view.size.height // 2)
+            view.zoom = 200.0
+            self.assertIn("▤▤│◆│▤▤", view.render().plain)
             application._advance_world()
             self.assertGreater(
                 application.world.snapshot().elapsed_seconds, initial_elapsed_s

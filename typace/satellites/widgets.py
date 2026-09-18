@@ -11,6 +11,7 @@ from textual.widget import Widget
 from textual.widgets import Button, Input, Label, ListItem, ListView, Static
 
 from typace.privacy import sanitize_text
+from typace.i18n import DEFAULT_LOCALE, Locale, translate
 from typace.satellites.commands import (
     Deorbit,
     ManualActuation,
@@ -58,49 +59,98 @@ class SatellitePanel(Widget):
             self.satellite_id = satellite_id
             self.command = command
 
-    def __init__(self) -> None:
-        super().__init__(id="satellite-panel")
+    def __init__(self, locale: Locale = DEFAULT_LOCALE) -> None:
+        super().__init__(id="satellite-panel", classes="floating-panel")
+        self._ui_locale: Locale = locale
         self._snapshot: WorldSnapshot | None = None
         self._selected_satellite_id: str | None = None
         self._listed_satellite_ids: tuple[str, ...] = ()
+        self.border_title = translate(locale, "satellite.title")
 
     def compose(self) -> ComposeResult:
         with Vertical():
             yield ListView(id="satellite-list")
             yield Static("", id="satellite-telemetry")
             with Horizontal(classes="satellite-input-row"):
-                yield Label("Altitude m")
+                yield Label(
+                    translate(self._ui_locale, "satellite.altitude"),
+                    id="satellite-altitude-label",
+                )
                 yield Input(type="number", id="satellite-altitude")
             with Horizontal(classes="satellite-input-row"):
-                yield Label("Inclination")
+                yield Label(
+                    translate(self._ui_locale, "satellite.inclination"),
+                    id="satellite-inclination-label",
+                )
                 yield Input(type="number", id="satellite-inclination")
             with Horizontal(classes="satellite-input-row"):
-                yield Label("Apsis p/a")
+                yield Label(
+                    translate(self._ui_locale, "satellite.apsides"),
+                    id="satellite-apsides-label",
+                )
                 yield Input(type="number", id="satellite-periapsis")
                 yield Input(type="number", id="satellite-apoapsis")
             with Horizontal(classes="satellite-input-row"):
-                yield Label("Target body")
+                yield Label(
+                    translate(self._ui_locale, "satellite.target"),
+                    id="satellite-target-label",
+                )
                 yield Input(id="satellite-target-body")
             with Horizontal(classes="satellite-actions"):
-                yield Button("Set orbit", id="satellite-set-orbit")
-                yield Button("Take control", id="satellite-take-control")
-                yield Button("Set apsides", id="satellite-set-apsides")
-                yield Button("Transfer", id="satellite-transfer")
+                yield Button(
+                    translate(self._ui_locale, "satellite.set_orbit"),
+                    id="satellite-set-orbit",
+                )
+                yield Button(
+                    translate(self._ui_locale, "satellite.take_control"),
+                    id="satellite-take-control",
+                )
+                yield Button(
+                    translate(self._ui_locale, "satellite.set_apsides"),
+                    id="satellite-set-apsides",
+                )
+                yield Button(
+                    translate(self._ui_locale, "satellite.transfer"),
+                    id="satellite-transfer",
+                )
             with Horizontal(classes="satellite-actions"):
-                yield Button("Return stable", id="satellite-return-stable")
+                yield Button(
+                    translate(self._ui_locale, "satellite.return_stable"),
+                    id="satellite-return-stable",
+                )
             with Horizontal(classes="satellite-actions"):
-                yield Button("Return auto", id="satellite-return-auto")
-                yield Button("Deorbit", id="satellite-deorbit", variant="warning")
+                yield Button(
+                    translate(self._ui_locale, "satellite.return_auto"),
+                    id="satellite-return-auto",
+                )
+                yield Button(
+                    translate(self._ui_locale, "satellite.deorbit"),
+                    id="satellite-deorbit",
+                    variant="warning",
+                )
             with Horizontal(classes="satellite-actions"):
-                yield Button("Ignite", id="satellite-ignite", variant="primary")
-                yield Button("Shutdown", id="satellite-shutdown")
+                yield Button(
+                    translate(self._ui_locale, "satellite.ignite"),
+                    id="satellite-ignite",
+                    variant="primary",
+                )
+                yield Button(
+                    translate(self._ui_locale, "satellite.shutdown"),
+                    id="satellite-shutdown",
+                )
             with Horizontal(classes="satellite-input-row"):
-                yield Label("Throttle")
+                yield Label(
+                    translate(self._ui_locale, "satellite.throttle"),
+                    id="satellite-throttle-label",
+                )
                 yield Input(type="number", id="satellite-throttle")
                 yield Input(placeholder="wheel x,y,z", id="satellite-wheel")
                 yield Input(placeholder="RCS x,y,z", id="satellite-rcs")
             with Horizontal(classes="satellite-actions"):
-                yield Button("Manual apply", id="satellite-manual-apply")
+                yield Button(
+                    translate(self._ui_locale, "satellite.manual_apply"),
+                    id="satellite-manual-apply",
+                )
             yield Static("", id="satellite-feedback")
 
     def set_snapshot(self, snapshot: WorldSnapshot) -> None:
@@ -112,6 +162,37 @@ class SatellitePanel(Widget):
             if available_ids != self._listed_satellite_ids:
                 self._refresh_list()
             self._refresh_telemetry()
+
+    def set_locale(self, locale: Locale) -> None:
+        """Update all visible panel labels without rebuilding simulation state."""
+        self._ui_locale = locale
+        self.border_title = translate(locale, "satellite.title")
+        if not self.is_mounted:
+            return
+        labels = {
+            "#satellite-altitude-label": "satellite.altitude",
+            "#satellite-inclination-label": "satellite.inclination",
+            "#satellite-apsides-label": "satellite.apsides",
+            "#satellite-target-label": "satellite.target",
+            "#satellite-throttle-label": "satellite.throttle",
+        }
+        buttons = {
+            "#satellite-set-orbit": "satellite.set_orbit",
+            "#satellite-take-control": "satellite.take_control",
+            "#satellite-set-apsides": "satellite.set_apsides",
+            "#satellite-transfer": "satellite.transfer",
+            "#satellite-return-stable": "satellite.return_stable",
+            "#satellite-return-auto": "satellite.return_auto",
+            "#satellite-deorbit": "satellite.deorbit",
+            "#satellite-ignite": "satellite.ignite",
+            "#satellite-shutdown": "satellite.shutdown",
+            "#satellite-manual-apply": "satellite.manual_apply",
+        }
+        for selector, key in labels.items():
+            self.query_one(selector, Label).update(translate(locale, key))
+        for selector, key in buttons.items():
+            self.query_one(selector, Button).label = translate(locale, key)
+        self._refresh_telemetry()
 
     def set_feedback(self, text: str) -> None:
         if not self.is_mounted:
@@ -136,7 +217,7 @@ class SatellitePanel(Widget):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if self._selected_satellite_id is None:
-            self.set_feedback("No active satellite")
+            self.set_feedback(translate(self._ui_locale, "satellite.no_active"))
             return
         command = self._command_for_button(event.button.id)
         if command is not None:
@@ -152,7 +233,7 @@ class SatellitePanel(Widget):
                 return SetOrbitAltitude(altitude)
             if inclination_deg is not None:
                 return SetInclination(radians(inclination_deg))
-            self.set_feedback("Enter altitude or inclination")
+            self.set_feedback(translate(self._ui_locale, "satellite.enter_orbit"))
             return None
         if button_id == "satellite-take-control":
             return TakeManualControl()
@@ -160,14 +241,14 @@ class SatellitePanel(Widget):
             periapsis = self._number_input("#satellite-periapsis")
             apoapsis = self._number_input("#satellite-apoapsis")
             if periapsis is None or apoapsis is None:
-                self.set_feedback("Enter periapsis and apoapsis")
+                self.set_feedback(translate(self._ui_locale, "satellite.enter_apsides"))
                 return None
             return SetApsides(periapsis, apoapsis)
         if button_id == "satellite-transfer":
             target = self.query_one("#satellite-target-body", Input).value.strip()
             if target:
                 return TransferPrimary(target)
-            self.set_feedback("Enter a target body")
+            self.set_feedback(translate(self._ui_locale, "satellite.enter_target"))
             return None
         if button_id == "satellite-return-stable":
             return ReturnStableOrbit()
@@ -231,7 +312,7 @@ class SatellitePanel(Widget):
             return
         satellite = self._selected_satellite()
         if satellite is None:
-            telemetry.update("No active satellite")
+            telemetry.update(translate(self._ui_locale, "satellite.no_active"))
             return
         snapshot = self._snapshot
         assert snapshot is not None
@@ -244,24 +325,27 @@ class SatellitePanel(Widget):
             None,
         )
         event_text = "-" if recent_event is None else recent_event.cause.value
+        mode_text = translate(
+            self._ui_locale, f"satellite.mode.{satellite.control_mode.value}"
+        )
         telemetry.update(
             "\n".join(
                 (
                     sanitize_text(satellite.display_name),
-                    f"Primary  {satellite.primary_body_id}",
-                    f"Mode     {satellite.control_mode.value}",
-                    f"Mass     {satellite.mass_kg:,.1f} kg",
-                    f"Main     {satellite.main_propellant_kg:,.1f} kg",
-                    f"RCS      {satellite.rcs_propellant_kg:,.1f} kg",
-                    f"Battery  {satellite.battery_energy_j / 3_600_000.0:,.2f} kWh",
-                    f"Queue    {satellite.pending_command_count}",
-                    f"Orbit    p {satellite.periapsis_altitude_m or 0:,.0f} / a {satellite.apoapsis_altitude_m or 0:,.0f} m",
-                    f"Incl    {satellite.inclination_deg or 0:,.2f} deg",
-                    f"Plan     {satellite.plan_objective_id or '-'} / {satellite.execution_status or '-'}",
-                    f"Alerts   {', '.join(satellite.conjunction_alert_ids) or '-'}",
-                    f"Safety   {satellite.safety_reason or '-'}",
-                    f"Failure  {satellite.planning_failure or '-'}",
-                    f"Event    {event_text}",
+                    f"{translate(self._ui_locale, 'satellite.primary')}  {satellite.primary_body_id}",
+                    f"{translate(self._ui_locale, 'satellite.mode')}     {mode_text}",
+                    f"{translate(self._ui_locale, 'satellite.mass')}     {satellite.mass_kg:,.1f} kg",
+                    f"{translate(self._ui_locale, 'satellite.main')}     {satellite.main_propellant_kg:,.1f} kg",
+                    f"{translate(self._ui_locale, 'satellite.rcs')}      {satellite.rcs_propellant_kg:,.1f} kg",
+                    f"{translate(self._ui_locale, 'satellite.battery')}  {satellite.battery_energy_j / 3_600_000.0:,.2f} kWh",
+                    f"{translate(self._ui_locale, 'satellite.queue')}    {satellite.pending_command_count}",
+                    f"{translate(self._ui_locale, 'satellite.orbit')}    p {satellite.periapsis_altitude_m or 0:,.0f} / a {satellite.apoapsis_altitude_m or 0:,.0f} m",
+                    f"{translate(self._ui_locale, 'satellite.incl')}    {satellite.inclination_deg or 0:,.2f} deg",
+                    f"{translate(self._ui_locale, 'satellite.plan')}     {satellite.plan_objective_id or '-'} / {satellite.execution_status or '-'}",
+                    f"{translate(self._ui_locale, 'satellite.alerts')}   {', '.join(satellite.conjunction_alert_ids) or '-'}",
+                    f"{translate(self._ui_locale, 'satellite.safety')}   {satellite.safety_reason or '-'}",
+                    f"{translate(self._ui_locale, 'satellite.failure')}  {satellite.planning_failure or '-'}",
+                    f"{translate(self._ui_locale, 'satellite.event')}    {event_text}",
                 )
             )
         )

@@ -62,6 +62,7 @@ from typace.simulation.events import (
     locate_collision_time_s,
     locate_destruction_time_s,
 )
+from typace.tasks import ThreadTaskManager
 from typace.vehicle.actuators import ActuatorCommand
 from typace.vehicle.dynamics import PowerEnvironment, advance_vehicle
 from typace.vehicle.power import PowerMode
@@ -83,6 +84,22 @@ class WorldSnapshot:
             if satellite.id == satellite_id:
                 return satellite
         raise KeyError(satellite_id)
+
+
+@dataclass(frozen=True, slots=True)
+class _SatelliteStepInput:
+    state: SatelliteState
+    autopilot: AutopilotState
+    previous_safety_reason: SafetyReason
+    duration_s: float
+    ephemeris: SolarSystemEphemeris
+    conjunction: ConjunctionCandidate | None
+
+
+@dataclass(frozen=True, slots=True)
+class _SatelliteStepOutput:
+    satellite_id: str
+    controlled_update: tuple[SatelliteState, AutopilotState, SafetyDecision] | None
 
 
 class SimulationWorld:
@@ -165,6 +182,17 @@ class SimulationWorld:
         return CommandResult(CommandStatus.ACCEPTED)
 
     def step(self, duration_s: float) -> WorldSnapshot:
+        return self._step(duration_s, None)
+
+    def step_parallel(
+        self, duration_s: float, tasks: ThreadTaskManager
+    ) -> WorldSnapshot:
+        """Advance independent satellites on the shared compute pool."""
+        return self._step(duration_s, tasks)
+
+    def _step(
+        self, duration_s: float, tasks: ThreadTaskManager | None
+    ) -> WorldSnapshot:
         if duration_s < 0.0:
             raise ValueError("duration cannot be negative")
         if duration_s == 0.0:
@@ -186,30 +214,28 @@ class SimulationWorld:
         autopilot_updates: dict[str, AutopilotState] = {}
         safety_updates: dict[str, SafetyReason] = {}
         failure_events: list[DestructionEvent] = []
-        for state in frozen_states:
+        step_inputs = tuple(
+            _SatelliteStepInput(
+                state,
+                self._autopilots[state.definition.id],
+                self._safety_reasons[state.definition.id],
+                simulation_duration_s,
+                ephemeris,
+                risks_by_satellite.get(state.definition.id),
+            )
+            for state in frozen_states
+        )
+        step_outputs = (
+            tuple(_advance_satellite(value) for value in step_inputs)
+            if tasks is None
+            else tasks.map_compute(_advance_satellite, step_inputs)
+        )
+        states_by_id = {state.definition.id: state for state in frozen_states}
+        for step_output in step_outputs:
+            satellite_id = step_output.satellite_id
+            state = states_by_id[satellite_id]
             satellite_id = state.definition.id
-            controlled_update: (
-                tuple[SatelliteState, AutopilotState, SafetyDecision] | None
-            ) = None
-            try:
-                controlled_state, autopilot, decision = _control_request(
-                    state,
-                    self._autopilots[satellite_id],
-                    self._safety_reasons[satellite_id],
-                    simulation_duration_s,
-                    ephemeris,
-                    risks_by_satellite.get(satellite_id),
-                )
-                update = _advance_state(
-                    controlled_state,
-                    ephemeris,
-                    decision.command,
-                    simulation_duration_s,
-                )
-                update = _transition_primary(update, ephemeris)
-                controlled_update = update, autopilot, decision
-            except Exception:
-                update = None
+            controlled_update = step_output.controlled_update
             update_is_invalid = controlled_update is None or not _state_is_valid(
                 controlled_update[0]
             )
@@ -436,6 +462,7 @@ def _control_request(
         transfer_target=_transfer_target(state, objective, ephemeris),
         conjunction_risk=_conjunction_risk(conjunction),
     )
+
     vehicle = state.vehicle
     planning_finished = (
         output.state.plan is not None or output.state.planning_failure is not None
@@ -447,6 +474,30 @@ def _control_request(
         output.state,
         output.decision,
     )
+
+
+def _advance_satellite(value: _SatelliteStepInput) -> _SatelliteStepOutput:
+    satellite_id = value.state.definition.id
+    try:
+        controlled_state, autopilot, decision = _control_request(
+            value.state,
+            value.autopilot,
+            value.previous_safety_reason,
+            value.duration_s,
+            value.ephemeris,
+            value.conjunction,
+        )
+        update = _advance_state(
+            controlled_state,
+            value.ephemeris,
+            decision.command,
+            value.duration_s,
+        )
+        update = _transition_primary(update, value.ephemeris)
+        controlled_update = update, autopilot, decision
+    except Exception:
+        controlled_update = None
+    return _SatelliteStepOutput(satellite_id, controlled_update)
 
 
 def _autopilot_is_quiescent(state: SatelliteState, autopilot: AutopilotState) -> bool:

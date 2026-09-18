@@ -1,6 +1,7 @@
 """The typace Textual application."""
 
 from dataclasses import dataclass
+from concurrent.futures import Future
 from math import isfinite
 from pathlib import Path
 from typing import Literal
@@ -33,7 +34,9 @@ from typace.keybindings import APP_BINDINGS, SETTINGS_BINDINGS
 from typace.solar_system import load_solar_system
 from typace.satellites import load_catalog
 from typace.satellites.widgets import SatellitePanel
-from typace.simulation import SimulationWorld
+from typace.simulation import SimulationWorld, WorldSnapshot
+from typace.tasks import ThreadTaskManager
+from typace.celestial.rendering import TextureAtlasCache, prepare_texture_atlases
 
 CONTROL_PANEL_REFRESH_SECONDS = 0.25
 FLOATING_PANEL_WIDTH = 36
@@ -365,6 +368,13 @@ class TyPaceApp(App[None]):
     SatellitePanel {
         layer: selected-panel;
         position: absolute;
+        width: 42;
+        height: auto;
+        max-height: 96%;
+        padding: 0 1;
+        border: solid #37cdf5;
+        background: #05090d 96%;
+        color: #c8d7e8;
     }
     .floating-panel.selected {
         layer: selected-panel;
@@ -392,8 +402,11 @@ class TyPaceApp(App[None]):
         self.status_bar = StatusBar(self.celestial_view, self._ui_locale)
         self.hint_strip = Label(_hint_text(self._ui_locale), id="hint-strip")
         self.selected_panel_index: int | None = 0
+        self.tasks = ThreadTaskManager()
+        self._world_step_future: Future[WorldSnapshot] | None = None
+        self._pending_real_seconds = 0.0
         self.world = SimulationWorld.from_catalog(load_catalog(satellite_catalogs))
-        self.satellite_panel = SatellitePanel()
+        self.satellite_panel = SatellitePanel(self._ui_locale)
         snapshot = self.world.snapshot()
         self.satellite_panel.set_snapshot(snapshot)
         self.selected_satellite_id = snapshot.satellites[0].id
@@ -416,14 +429,49 @@ class TyPaceApp(App[None]):
         self.set_interval(FRAME_INTERVAL_SECONDS, self._advance_world)
         self.set_focus(self.celestial_view)
         self.call_after_refresh(lambda: self.set_focus(self.celestial_view))
+        atlas_future = self.tasks.submit_serial(
+            prepare_texture_atlases, self.celestial_view.system
+        )
+        atlas_future.add_done_callback(self._on_atlases_ready)
 
     def _advance_world(self) -> None:
         if self.celestial_view.paused:
             return
-        self.world.set_time_warp(self.celestial_view.warp)
-        snapshot = self.world.step(FRAME_INTERVAL_SECONDS)
+        self._pending_real_seconds += FRAME_INTERVAL_SECONDS
+        if self._world_step_future is not None:
+            return
+        duration_s = self._pending_real_seconds
+        self._pending_real_seconds = 0.0
+        self._world_step_future = self.tasks.submit_serial(
+            self._step_world, duration_s, self.celestial_view.warp
+        )
+        self._world_step_future.add_done_callback(self._on_world_step_ready)
+
+    def _step_world(self, duration_s: float, time_warp: float) -> WorldSnapshot:
+        self.world.set_time_warp(time_warp)
+        return self.world.step_parallel(duration_s, self.tasks)
+
+    def _on_world_step_ready(self, future: Future[WorldSnapshot]) -> None:
+        if self._loop is not None and self._loop.is_closed():
+            return
+        self.call_from_thread(self._apply_world_step, future)
+
+    def _apply_world_step(self, future: Future[WorldSnapshot]) -> None:
+        self._world_step_future = None
+        snapshot = future.result()
         self.satellite_panel.set_snapshot(snapshot)
         self.celestial_view.set_world_snapshot(snapshot, self.selected_satellite_id)
+        if self._pending_real_seconds > 0.0 and not self.celestial_view.paused:
+            self._advance_world()
+
+    def _on_atlases_ready(self, future: Future[TextureAtlasCache]) -> None:
+        if self._loop is not None and self._loop.is_closed():
+            return
+        self.call_from_thread(self.celestial_view.set_texture_atlases, future.result())
+
+    def on_unmount(self) -> None:
+        # Do not block Textual's UI loop while a long first physics step drains.
+        self.tasks.shutdown(wait=False)
 
     def on_celestial_system_view_satellite_selected(
         self, message: CelestialSystemView.SatelliteSelected
@@ -433,6 +481,7 @@ class TyPaceApp(App[None]):
 
     def on_satellite_panel_selected(self, message: SatellitePanel.Selected) -> None:
         self.selected_satellite_id = message.selection.satellite_id
+        self.celestial_view.focus_satellite(self.selected_satellite_id)
         self.celestial_view.set_world_snapshot(
             self.world.snapshot(), self.selected_satellite_id
         )
@@ -442,7 +491,9 @@ class TyPaceApp(App[None]):
     ) -> None:
         result = self.world.submit(message.satellite_id, message.command)
         self.satellite_panel.set_feedback(
-            "Accepted" if result.accepted else result.reason
+            translate(self._ui_locale, "satellite.accepted")
+            if result.accepted
+            else result.reason
         )
         snapshot = self.world.snapshot()
         self.satellite_panel.set_snapshot(snapshot)
@@ -471,7 +522,10 @@ class TyPaceApp(App[None]):
             else FLOATING_PANEL_MARGIN + FLOATING_PANEL_STACK_OFFSET
         )
         self.camera_panel.offset = (right, camera_y)
-        self.satellite_panel.offset = (max(0, columns - 40), 0)
+        self.satellite_panel.offset = (
+            max(0, columns - 42 - FLOATING_PANEL_MARGIN),
+            FLOATING_PANEL_MARGIN,
+        )
 
     def _visible_panel_indices(self) -> tuple[int, ...]:
         return tuple(
@@ -522,6 +576,7 @@ class TyPaceApp(App[None]):
         self.status_bar.set_locale(result.locale)
         self.hint_strip.update(_hint_text(result.locale))
         self.celestial_view.set_locale(result.locale)
+        self.satellite_panel.set_locale(result.locale)
         self.celestial_view.set_simulation(
             elapsed_seconds=result.elapsed_seconds,
             warp_index=result.warp_index,

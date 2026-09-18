@@ -22,12 +22,16 @@ from typace.celestial.rendering import (
     SIDE_BASIS,
     TOP_BASIS,
     TextureAtlasCache,
-    prepare_texture_atlases,
     render_system,
 )
 from typace.i18n import DEFAULT_LOCALE, Locale
 from typace.config.simulation import TIME_WARPS
-from typace.satellites.rendering import SatelliteMarker, project_satellites
+from typace.satellites.rendering import (
+    SatelliteMarker,
+    SatelliteOrbit,
+    project_satellite_orbits,
+    project_satellites,
+)
 from typace.simulation.world import WorldSnapshot
 
 # 30 Hz keeps motion visually continuous while leaving enough frame budget for
@@ -52,6 +56,7 @@ MAX_ZOOM = 200.0
 DEFAULT_TERMINAL_CELL_PIXEL_ASPECT_RATIO = 0.5
 BRAILLE_COLUMNS_PER_CELL = 2
 BRAILLE_ROWS_PER_CELL = 4
+SATELLITE_MODEL = ("  ╭─╮  ", "▤▤│◆│▤▤", "  ╰─╯  ")
 
 
 class CelestialSystemView(Widget):
@@ -82,10 +87,12 @@ class CelestialSystemView(Widget):
         self._ui_locale: Locale = DEFAULT_LOCALE
         self.last_scene = Scene(Text(), {})
         self.disk_raster_cache: DiskRasterCache = {}
-        self.texture_atlas_cache: TextureAtlasCache = prepare_texture_atlases(system)
+        self.texture_atlas_cache: TextureAtlasCache = {}
         self.world_snapshot: WorldSnapshot | None = None
         self.selected_satellite_id: str | None = None
+        self.focused_satellite_id: str | None = None
         self.satellite_markers: tuple[SatelliteMarker, ...] = ()
+        self.satellite_orbits: tuple[SatelliteOrbit, ...] = ()
         self._world_clock_bound = False
         self._satellite_trails: dict[str, deque[tuple[int, int]]] = {}
         self._seen_destruction_event_ids: set[str] = set()
@@ -139,6 +146,7 @@ class CelestialSystemView(Widget):
         self.zoom = 1.0
         self.pan_x = 0.0
         self.pan_y = 0.0
+        self.focused_satellite_id = None
         self.refresh()
 
     def set_cell_pixel_aspect_ratio(self, aspect_ratio: float) -> None:
@@ -160,6 +168,12 @@ class CelestialSystemView(Widget):
         self.elapsed_seconds = snapshot.elapsed_seconds
         if snapshot.selected_time_warp in TIME_WARPS:
             self.warp_index = TIME_WARPS.index(snapshot.selected_time_warp)
+        self.refresh()
+
+    def set_texture_atlases(self, atlases: TextureAtlasCache) -> None:
+        """Install background-prepared immutable texture atlases."""
+        self.texture_atlas_cache = atlases
+        self.disk_raster_cache.clear()
         self.refresh()
 
     def set_simulation(
@@ -192,6 +206,16 @@ class CelestialSystemView(Widget):
         snapshot = state_at(self.system, self.elapsed_seconds)
         selected = self.selected_body
         center = snapshot.positions[selected.id] if selected is not None else Vec3()
+        if self.focused_satellite_id is not None and self.world_snapshot is not None:
+            try:
+                focused_satellite = self.world_snapshot.satellite(
+                    self.focused_satellite_id
+                )
+                primary_position = snapshot.positions[focused_satellite.primary_body_id]
+                relative_position = Vec3(*focused_satellite.position_m)
+                center = primary_position + relative_position
+            except KeyError:
+                self.focused_satellite_id = None
         basis = VIEW_MODES[self.view_index][1]
         center += basis.x * self.pan_x + basis.y * self.pan_y
         scale, vertical_scale = self._projection_scale(columns, rows)
@@ -209,7 +233,7 @@ class CelestialSystemView(Widget):
             disk_raster_cache=self.disk_raster_cache,
             texture_atlas_cache=self.texture_atlas_cache,
         )
-        return self._render_satellites(snapshot, center, scale, basis)
+        return self._render_satellites(snapshot, center, scale, basis, vertical_scale)
 
     def _render_satellites(
         self,
@@ -217,6 +241,7 @@ class CelestialSystemView(Widget):
         center: Vec3,
         scale: float,
         basis: Basis,
+        vertical_scale: float,
     ) -> Text:
         if self.world_snapshot is None:
             self.satellite_markers = ()
@@ -225,7 +250,20 @@ class CelestialSystemView(Widget):
             body_id: np.asarray((position.x, position.y, position.z))
             for body_id, position in celestial_snapshot.positions.items()
         }
+        primary_masses = {body.id: body.mass_kg for body in self.system.bodies}
         center_vector = np.asarray((center.x, center.y, center.z))
+        self.satellite_orbits = project_satellite_orbits(
+            self.world_snapshot.satellites,
+            primary_positions,
+            primary_masses,
+            center_vector,
+            scale,
+            basis,
+            self.size.width,
+            self.size.height,
+            selected_satellite_id=self.selected_satellite_id,
+            vertical_scale=vertical_scale,
+        )
         self.satellite_markers = project_satellites(
             self.world_snapshot.satellites,
             primary_positions,
@@ -235,6 +273,7 @@ class CelestialSystemView(Widget):
             self.size.width,
             self.size.height,
             selected_satellite_id=self.selected_satellite_id,
+            vertical_scale=vertical_scale,
         )
         for marker in self.satellite_markers:
             trail = self._satellite_trails.setdefault(
@@ -247,8 +286,23 @@ class CelestialSystemView(Widget):
                 if 0 <= row < len(lines) and 0 <= column < len(lines[row]):
                     if lines[row][column] == " ":
                         lines[row][column] = "·"
+        for orbit in self.satellite_orbits:
+            for column, row in orbit.points:
+                if lines[row][column] in (" ", "·"):
+                    lines[row][column] = ":"
         for marker in self.satellite_markers:
             lines[marker.row][marker.column] = marker.glyph
+        for marker in self.satellite_markers:
+            if marker.projected_radius_cells < 1.5:
+                continue
+            for row_offset, model_line in enumerate(SATELLITE_MODEL, -1):
+                target_row = marker.row + row_offset
+                if not 0 <= target_row < len(lines):
+                    continue
+                for column_offset, glyph in enumerate(model_line, -3):
+                    target_column = marker.column + column_offset
+                    if 0 <= target_column < len(lines[target_row]) and glyph != " ":
+                        lines[target_row][target_column] = glyph
         if self.world_snapshot is not None:
             for event in self.world_snapshot.destruction_events:
                 if event.event_id not in self._seen_destruction_event_ids:
@@ -260,10 +314,28 @@ class CelestialSystemView(Widget):
                             lines[row][column] = "✹"
         overlaid = self.last_scene.text.copy()
         overlaid.plain = "\n".join("".join(line) for line in lines)
+        for orbit in self.satellite_orbits:
+            color = "#ffcf66" if orbit.selected else orbit.color
+            for column, row in orbit.points:
+                offset = row * (self.size.width + 1) + column
+                overlaid.stylize(color, offset, offset + 1)
         for marker in self.satellite_markers:
             offset = marker.row * (self.size.width + 1) + marker.column
-            color = "bold #ffcf66" if marker.selected else "bold #7ef5d2"
+            color = "bold #ffcf66" if marker.selected else f"bold {marker.color}"
             overlaid.stylize(color, offset, offset + 1)
+            if marker.projected_radius_cells >= 1.5:
+                for row_offset in range(-1, 2):
+                    target_row = marker.row + row_offset
+                    if not 0 <= target_row < self.size.height:
+                        continue
+                    start_column = max(0, marker.column - 3)
+                    end_column = min(self.size.width, marker.column + 4)
+                    model_offset = target_row * (self.size.width + 1)
+                    overlaid.stylize(
+                        color,
+                        model_offset + start_column,
+                        model_offset + end_column,
+                    )
         return overlaid
 
     def action_toggle_pause(self) -> None:
@@ -300,6 +372,13 @@ class CelestialSystemView(Widget):
     def action_system_view(self) -> None:
         self.selected_index = None
         self._reset_camera()
+
+    def focus_satellite(self, satellite_id: str) -> None:
+        """Center subsequent zoom and pan actions on a selected satellite."""
+        self._reset_camera()
+        self.focused_satellite_id = satellite_id
+        self.selected_satellite_id = satellite_id
+        self.refresh()
 
     def action_zoom_in(self) -> None:
         self.zoom = min(MAX_ZOOM, self.zoom * ZOOM_STEP)
@@ -354,8 +433,8 @@ class CelestialSystemView(Widget):
         for marker in self.satellite_markers:
             if (marker.column, marker.row) == (offset.x, offset.y):
                 self.selected_satellite_id = marker.satellite_id
+                self.focus_satellite(marker.satellite_id)
                 self.post_message(self.SatelliteSelected(marker.satellite_id))
-                self.refresh()
                 return
         body_id = self.last_scene.body_cells.get((offset.x, offset.y))
         if body_id is None:
@@ -363,4 +442,5 @@ class CelestialSystemView(Widget):
         self.selected_index = next(
             index for index, body in enumerate(self.system.bodies) if body.id == body_id
         )
+        self.focused_satellite_id = None
         self._reset_camera()
