@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from math import isfinite
+from pathlib import Path
 from typing import Literal
 
 from rich.text import Text
@@ -15,6 +16,7 @@ from textual.widgets import Button, Input, Label, Select, Static, Switch
 from typace.celestial.orbital import DAY_SECONDS
 from typace.celestial.view import (
     DEFAULT_TERMINAL_CELL_PIXEL_ASPECT_RATIO,
+    FRAME_INTERVAL_SECONDS,
     TIME_WARPS,
     VIEW_MODES,
     CelestialSystemView,
@@ -29,6 +31,9 @@ from typace.i18n import (
 )
 from typace.keybindings import APP_BINDINGS, SETTINGS_BINDINGS
 from typace.solar_system import load_solar_system
+from typace.satellites import load_catalog
+from typace.satellites.widgets import SatellitePanel
+from typace.simulation import SimulationWorld
 
 CONTROL_PANEL_REFRESH_SECONDS = 0.25
 FLOATING_PANEL_WIDTH = 36
@@ -357,6 +362,10 @@ class TyPaceApp(App[None]):
     }
     #simulation-panel { height: 7; }
     #camera-panel { height: 6; }
+    SatellitePanel {
+        layer: selected-panel;
+        position: absolute;
+    }
     .floating-panel.selected {
         layer: selected-panel;
         border: solid #eeb860;
@@ -369,7 +378,7 @@ class TyPaceApp(App[None]):
     BINDINGS = APP_BINDINGS
     cell_pixel_aspect_ratio = DEFAULT_TERMINAL_CELL_PIXEL_ASPECT_RATIO
 
-    def __init__(self) -> None:
+    def __init__(self, satellite_catalogs: tuple[Path, ...] = ()) -> None:
         super().__init__()
         self._ui_locale: Locale = DEFAULT_LOCALE
         self.celestial_view = CelestialSystemView(
@@ -383,16 +392,54 @@ class TyPaceApp(App[None]):
         self.status_bar = StatusBar(self.celestial_view, self._ui_locale)
         self.hint_strip = Label(_hint_text(self._ui_locale), id="hint-strip")
         self.selected_panel_index: int | None = 0
+        self.world = SimulationWorld.from_catalog(load_catalog(satellite_catalogs))
+        self.satellite_panel = SatellitePanel()
+        snapshot = self.world.snapshot()
+        self.satellite_panel.set_snapshot(snapshot)
+        self.selected_satellite_id = snapshot.satellites[0].id
+        self.celestial_view.set_world_snapshot(snapshot, self.selected_satellite_id)
 
     def compose(self) -> ComposeResult:
         yield self.status_bar
-        yield Container(self.celestial_view, *self.control_panels, id="workspace")
+        yield Container(
+            self.celestial_view,
+            *self.control_panels,
+            self.satellite_panel,
+            id="workspace",
+        )
         yield self.hint_strip
 
     def on_mount(self) -> None:
         self._apply_cell_pixel_aspect_ratio()
         self._position_panels(self.size.width)
         self._update_panel_selection()
+        self.set_interval(FRAME_INTERVAL_SECONDS, self._advance_world)
+        self.call_after_refresh(self.celestial_view.focus)
+
+    def _advance_world(self) -> None:
+        if self.celestial_view.paused:
+            return
+        self.world.set_time_warp(self.celestial_view.warp)
+        snapshot = self.world.step(FRAME_INTERVAL_SECONDS)
+        self.satellite_panel.set_snapshot(snapshot)
+        self.celestial_view.set_world_snapshot(snapshot, self.selected_satellite_id)
+
+    def on_satellite_panel_selected(self, message: SatellitePanel.Selected) -> None:
+        self.selected_satellite_id = message.selection.satellite_id
+        self.celestial_view.set_world_snapshot(
+            self.world.snapshot(), self.selected_satellite_id
+        )
+
+    def on_satellite_panel_command_submitted(
+        self, message: SatellitePanel.CommandSubmitted
+    ) -> None:
+        result = self.world.submit(message.satellite_id, message.command)
+        self.satellite_panel.set_feedback(
+            "Accepted" if result.accepted else result.reason
+        )
+        snapshot = self.world.snapshot()
+        self.satellite_panel.set_snapshot(snapshot)
+        self.celestial_view.set_world_snapshot(snapshot, self.selected_satellite_id)
 
     def on_resize(self, event: events.Resize) -> None:
         if event.pixel_size is None:
@@ -417,6 +464,7 @@ class TyPaceApp(App[None]):
             else FLOATING_PANEL_MARGIN + FLOATING_PANEL_STACK_OFFSET
         )
         self.camera_panel.offset = (right, camera_y)
+        self.satellite_panel.offset = (max(0, columns - 40), 0)
 
     def _visible_panel_indices(self) -> tuple[int, ...]:
         return tuple(

@@ -39,6 +39,9 @@ class SDLDriver(Driver):
         self.enabled = True
         self.last_mouse = (0, 0)
         self.dirty = True
+        self.screen = pyte.Screen(1, 1)
+        self.stream = pyte.Stream(self.screen)
+        self.pixel_size = (0, 0)
         sdl.SDL_SetMainReady()
         if not sdl.SDL_InitSubSystem(sdl.SDL_INIT_VIDEO):
             raise RuntimeError(sdl.SDL_GetError())
@@ -66,9 +69,6 @@ class SDLDriver(Driver):
                 raise RuntimeError(sdl.SDL_GetError())
             sdl.SDL_GL_SetSwapInterval(0)
             self.renderer = ScreenRenderer(options)
-            self.screen = pyte.Screen(1, 1)
-            self.stream = pyte.Stream(self.screen)
-            self.pixel_size = (0, 0)
             self._resize()
             if not sdl.SDL_StartTextInput(self.window):
                 raise RuntimeError(sdl.SDL_GetError())
@@ -103,8 +103,7 @@ class SDLDriver(Driver):
                 self.dirty = True
             except Empty:
                 break
-        if self.dirty:
-            assert self.renderer is not None
+        if self.dirty and self.renderer is not None:
             self.renderer.draw(self.screen, *self.pixel_size)
             sdl.SDL_GL_SwapWindow(self.window)
             self.dirty = False

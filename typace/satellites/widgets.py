@@ -5,6 +5,7 @@ from math import radians
 
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
+from textual.css.query import NoMatches
 from textual.message import Message
 from textual.widget import Widget
 from textual.widgets import Button, Input, Label, ListItem, ListView, Static
@@ -58,6 +59,7 @@ class SatellitePanel(Widget):
         super().__init__(id="satellite-panel")
         self._snapshot: WorldSnapshot | None = None
         self._selected_satellite_id: str | None = None
+        self._listed_satellite_ids: tuple[str, ...] = ()
 
     def compose(self) -> ComposeResult:
         with Vertical():
@@ -86,11 +88,17 @@ class SatellitePanel(Widget):
         if self._selected_satellite_id not in available_ids:
             self._selected_satellite_id = available_ids[0] if available_ids else None
         if self.is_mounted:
-            self._refresh_list()
+            if available_ids != self._listed_satellite_ids:
+                self._refresh_list()
             self._refresh_telemetry()
 
     def set_feedback(self, text: str) -> None:
-        self.query_one("#satellite-feedback", Static).update(sanitize_text(text))
+        if not self.is_mounted:
+            return
+        try:
+            self.query_one("#satellite-feedback", Static).update(sanitize_text(text))
+        except NoMatches:
+            return
 
     def on_mount(self) -> None:
         self._refresh_list()
@@ -151,6 +159,9 @@ class SatellitePanel(Widget):
         view.clear()
         if self._snapshot is None:
             return
+        self._listed_satellite_ids = tuple(
+            satellite.id for satellite in self._snapshot.satellites
+        )
         for satellite in self._snapshot.satellites:
             view.append(
                 ListItem(
@@ -160,7 +171,12 @@ class SatellitePanel(Widget):
             )
 
     def _refresh_telemetry(self) -> None:
-        telemetry = self.query_one("#satellite-telemetry", Static)
+        if not self.is_mounted:
+            return
+        try:
+            telemetry = self.query_one("#satellite-telemetry", Static)
+        except NoMatches:
+            return
         satellite = self._selected_satellite()
         if satellite is None:
             telemetry.update("No active satellite")

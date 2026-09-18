@@ -1,6 +1,7 @@
 """Textual celestial-system widget."""
 
 from rich.text import Text
+import numpy as np
 from textual import events
 from textual.widget import Widget
 
@@ -10,7 +11,7 @@ from typace.celestial.model import (
     CelestialSystem,
     Vec3,
 )
-from typace.celestial.orbital import state_at
+from typace.celestial.orbital import CelestialState, state_at
 from typace.celestial.rendering import (
     Basis,
     DiskRasterCache,
@@ -23,11 +24,13 @@ from typace.celestial.rendering import (
     render_system,
 )
 from typace.i18n import DEFAULT_LOCALE, Locale
+from typace.config.simulation import TIME_WARPS
+from typace.satellites.rendering import SatelliteMarker, project_satellites
+from typace.simulation.world import WorldSnapshot
 
 # 30 Hz keeps motion visually continuous while leaving enough frame budget for
 # terminal output and the measured 5-7 ms scene render cost.
 FRAME_INTERVAL_SECONDS = 1.0 / 30.0
-TIME_WARPS = (1.0, 10.0, 100.0, 1_000.0, 10_000.0, 100_000.0)
 VIEW_MODES: tuple[tuple[str, Basis], ...] = (
     ("view.top", TOP_BASIS),
     ("view.oblique", OBLIQUE_BASIS),
@@ -62,7 +65,7 @@ class CelestialSystemView(Widget):
         self.system = system
         self.elapsed_seconds = 0.0
         self.selection_seconds = 0.0
-        self.warp_index = 0
+        self.warp_index = TIME_WARPS.index(1.0)
         self.paused = False
         self.selected_index = (
             None
@@ -78,6 +81,9 @@ class CelestialSystemView(Widget):
         self.last_scene = Scene(Text(), {})
         self.disk_raster_cache: DiskRasterCache = {}
         self.texture_atlas_cache: TextureAtlasCache = prepare_texture_atlases(system)
+        self.world_snapshot: WorldSnapshot | None = None
+        self.selected_satellite_id: str | None = None
+        self.satellite_markers: tuple[SatelliteMarker, ...] = ()
 
     @property
     def selected_body(self) -> CelestialBody | None:
@@ -135,6 +141,13 @@ class CelestialSystemView(Widget):
         self._ui_locale = locale
         self.refresh()
 
+    def set_world_snapshot(
+        self, snapshot: WorldSnapshot, selected_satellite_id: str | None
+    ) -> None:
+        self.world_snapshot = snapshot
+        self.selected_satellite_id = selected_satellite_id
+        self.refresh()
+
     def set_simulation(
         self, *, elapsed_seconds: float, warp_index: int, paused: bool
     ) -> None:
@@ -182,7 +195,44 @@ class CelestialSystemView(Widget):
             disk_raster_cache=self.disk_raster_cache,
             texture_atlas_cache=self.texture_atlas_cache,
         )
-        return self.last_scene.text
+        return self._render_satellites(snapshot, center, scale, basis)
+
+    def _render_satellites(
+        self,
+        celestial_snapshot: CelestialState,
+        center: Vec3,
+        scale: float,
+        basis: Basis,
+    ) -> Text:
+        if self.world_snapshot is None:
+            self.satellite_markers = ()
+            return self.last_scene.text
+        primary_positions = {
+            body_id: np.asarray((position.x, position.y, position.z))
+            for body_id in ("earth", "moon")
+            if (position := celestial_snapshot.positions.get(body_id)) is not None
+        }
+        center_vector = np.asarray((center.x, center.y, center.z))
+        self.satellite_markers = project_satellites(
+            self.world_snapshot.satellites,
+            primary_positions,
+            center_vector,
+            scale,
+            basis,
+            self.size.width,
+            self.size.height,
+            selected_satellite_id=self.selected_satellite_id,
+        )
+        lines = [list(line) for line in self.last_scene.text.plain.splitlines()]
+        for marker in self.satellite_markers:
+            lines[marker.row][marker.column] = marker.glyph
+        overlaid = self.last_scene.text.copy()
+        overlaid.plain = "\n".join("".join(line) for line in lines)
+        for marker in self.satellite_markers:
+            offset = marker.row * (self.size.width + 1) + marker.column
+            color = "bold #ffcf66" if marker.selected else "bold #7ef5d2"
+            overlaid.stylize(color, offset, offset + 1)
+        return overlaid
 
     def action_toggle_pause(self) -> None:
         self.paused = not self.paused

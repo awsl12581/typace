@@ -50,6 +50,7 @@ from typace.celestial.rendering import (
 )
 from typace.config.ui import DEFAULT_FALLBACK_FONTS, DEFAULT_FONT
 from typace.solar_system import load_solar_system
+from typace.satellites.widgets import SatellitePanel
 
 
 class SolarSystemModelTests(unittest.TestCase):
@@ -143,6 +144,24 @@ class AppEntryPointTests(unittest.TestCase):
 
 
 class SolarSystemInteractionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_satellite_world_panel_and_scene_are_wired(self) -> None:
+        application = TyPaceApp()
+
+        async with application.run_test(size=(100, 40)) as pilot:
+            await pilot.pause()
+            view = application.query_one(CelestialSystemView)
+            panel = application.query_one(SatellitePanel)
+            initial_elapsed_s = application.world.snapshot().elapsed_seconds
+            view.render()
+
+            self.assertEqual(len(application.world.snapshot().satellites), 6)
+            self.assertGreater(len(panel.query("ListItem")), 0)
+            self.assertGreaterEqual(len(view.satellite_markers), 1)
+            application._advance_world()
+            self.assertGreater(
+                application.world.snapshot().elapsed_seconds, initial_elapsed_s
+            )
+
     async def test_render_and_controls(self) -> None:
         application = TyPaceApp()
         self.assertFalse(application.ALLOW_SELECT)

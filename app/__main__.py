@@ -1,6 +1,7 @@
 """Start the application in a terminal or SDL window."""
 
 import argparse
+from pathlib import Path
 
 from typace.application import TyPaceApp
 from typace.config.ui import DEFAULT_FALLBACK_FONTS, DEFAULT_FONT
@@ -10,9 +11,16 @@ from typace.ui import WindowOptions, run
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--backend", choices=("terminal", "sdl"), default="terminal")
+    parser.add_argument(
+        "--satellite-catalog",
+        action="append",
+        type=Path,
+        default=[],
+        help="local satellite JSON file or directory; repeat to add catalogs",
+    )
     args = parser.parse_args()
 
-    application = TyPaceApp()
+    application = TyPaceApp(tuple(args.satellite_catalog))
     if args.backend == "terminal":
         run(application)
         return
