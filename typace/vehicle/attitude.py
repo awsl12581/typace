@@ -5,6 +5,8 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 
+from typace.config.vehicle import QUATERNION_NORM_TOLERANCE
+
 type Vector = NDArray[np.float64]
 
 
@@ -37,9 +39,20 @@ def normalize_quaternion(quaternion_wxyz: Vector) -> Vector:
 
 
 def rotate_body_to_inertial(quaternion_wxyz: Vector, body_vector: Vector) -> Vector:
-    if np.array_equal(quaternion_wxyz, np.asarray((1.0, 0.0, 0.0, 0.0))):
+    if (
+        quaternion_wxyz[0] == 1.0
+        and quaternion_wxyz[1] == 0.0
+        and quaternion_wxyz[2] == 0.0
+        and quaternion_wxyz[3] == 0.0
+    ):
         return body_vector
-    quaternion = normalize_quaternion(quaternion_wxyz)
+    norm_squared = float(np.dot(quaternion_wxyz, quaternion_wxyz))
+    quaternion_is_normalized = abs(norm_squared - 1.0) <= QUATERNION_NORM_TOLERANCE
+    quaternion = (
+        quaternion_wxyz
+        if quaternion_is_normalized
+        else normalize_quaternion(quaternion_wxyz)
+    )
     conjugate = quaternion * np.asarray((1.0, -1.0, -1.0, -1.0))
     pure_vector = np.concatenate((np.asarray((0.0,)), body_vector))
     return _quaternion_product(_quaternion_product(quaternion, pure_vector), conjugate)[
@@ -116,7 +129,10 @@ def _attitude_derivative(
     spin_quaternion = np.concatenate((np.asarray((0.0,)), angular_velocity_rad_s))
     quaternion_rate = 0.5 * _quaternion_product(quaternion_wxyz, spin_quaternion)
     angular_momentum = inertia_diagonal_kg_m2 * angular_velocity_rad_s
-    angular_acceleration = (
-        torque_n_m - np.cross(angular_velocity_rad_s, angular_momentum)
-    ) / inertia_diagonal_kg_m2
+    wx, wy, wz = angular_velocity_rad_s
+    hx, hy, hz = angular_momentum
+    gyroscopic_torque = np.asarray(
+        (wy * hz - wz * hy, wz * hx - wx * hz, wx * hy - wy * hx)
+    )
+    angular_acceleration = (torque_n_m - gyroscopic_torque) / inertia_diagonal_kg_m2
     return quaternion_rate, angular_acceleration

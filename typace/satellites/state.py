@@ -45,3 +45,7 @@ class SatelliteSnapshot:
     control_mode: ControlMode
     pending_command_count: int
     requires_replan: bool
+    plan_objective_id: str | None = None
+    execution_status: str | None = None
+    planning_failure: str | None = None
+    safety_reason: str | None = None

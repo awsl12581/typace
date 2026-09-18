@@ -1,6 +1,7 @@
 """Convert flight-plan burns into attitude and throttle targets."""
 
 from dataclasses import dataclass
+from functools import lru_cache
 
 import numpy as np
 from scipy.spatial.transform import Rotation
@@ -39,6 +40,21 @@ def guidance_for_plan(
 def target_attitude_for_direction(
     body_axis: np.ndarray, inertial_direction: np.ndarray
 ) -> np.ndarray:
+    return np.asarray(
+        _target_attitude_for_components(
+            tuple(float(value) for value in body_axis),
+            tuple(float(value) for value in inertial_direction),
+        )
+    )
+
+
+@lru_cache(maxsize=256)
+def _target_attitude_for_components(
+    body_axis_values: tuple[float, ...],
+    inertial_direction_values: tuple[float, ...],
+) -> tuple[float, float, float, float]:
+    body_axis = np.asarray(body_axis_values)
+    inertial_direction = np.asarray(inertial_direction_values)
     body_length = float(np.linalg.norm(body_axis))
     direction_length = float(np.linalg.norm(inertial_direction))
     if body_length == 0.0 or direction_length == 0.0:
@@ -49,4 +65,4 @@ def target_attitude_for_direction(
     )
     rotation = alignment[0]
     x, y, z, w = rotation.as_quat()
-    return np.asarray((w, x, y, z))
+    return float(w), float(x), float(y), float(z)

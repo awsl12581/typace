@@ -19,6 +19,11 @@ from typace.config.simulation import (
     TIME_WARPS,
 )
 from typace.config.vehicle import QUATERNION_NORM_TOLERANCE
+from typace.flight.autopilot import AutopilotState, autopilot_step
+from typace.flight.execution import ExecutionStatus
+from typace.flight.manual import manual_control
+from typace.flight.objectives import FlightObjective, ObjectivePriority
+from typace.flight.safety import SafetyDecision, SafetyReason, SafetyTelemetry
 from typace.physics.elements import CartesianState, ClassicalElements, elements_to_state
 from typace.physics.bodies import force_model_for
 from typace.physics.environment import OccludingBody
@@ -93,6 +98,12 @@ class SimulationWorld:
         self._effective_time_warp = 1.0
         self._time_warp_limit_reason: str | None = None
         self._destruction_events: list[DestructionEvent] = []
+        self._autopilots = {
+            satellite_id: AutopilotState.idle() for satellite_id in satellites
+        }
+        self._safety_reasons = {
+            satellite_id: SafetyReason.CLEAR for satellite_id in satellites
+        }
 
     @classmethod
     def from_catalog(
@@ -161,13 +172,34 @@ class SimulationWorld:
             self._satellites[satellite_id] for satellite_id in sorted(self._satellites)
         )
         updates: dict[str, SatelliteState] = {}
+        autopilot_updates: dict[str, AutopilotState] = {}
+        safety_updates: dict[str, SafetyReason] = {}
         failure_events: list[DestructionEvent] = []
         for state in frozen_states:
+            satellite_id = state.definition.id
+            controlled_update: (
+                tuple[SatelliteState, AutopilotState, SafetyDecision] | None
+            ) = None
             try:
-                update = _advance_state(state, ephemeris, simulation_duration_s)
+                controlled_state, autopilot, decision = _control_request(
+                    state,
+                    self._autopilots[satellite_id],
+                    self._safety_reasons[satellite_id],
+                    simulation_duration_s,
+                )
+                update = _advance_state(
+                    controlled_state,
+                    ephemeris,
+                    decision.command,
+                    simulation_duration_s,
+                )
+                controlled_update = update, autopilot, decision
             except Exception:
                 update = None
-            if update is None or not _state_is_valid(update):
+            update_is_invalid = controlled_update is None or not _state_is_valid(
+                controlled_update[0]
+            )
+            if update_is_invalid:
                 failure_events.append(
                     DestructionEvent(
                         f"numerical_failure-{state.definition.id}-{self._elapsed_seconds + simulation_duration_s:.6f}",
@@ -177,7 +209,11 @@ class SimulationWorld:
                     )
                 )
                 continue
-            updates[state.definition.id] = update
+            assert controlled_update is not None
+            update, autopilot, decision = controlled_update
+            updates[satellite_id] = update
+            autopilot_updates[satellite_id] = autopilot
+            safety_updates[satellite_id] = decision.reason
         healthy_previous = tuple(
             state for state in frozen_states if state.definition.id in updates
         )
@@ -203,12 +239,22 @@ class SimulationWorld:
             if satellite_id not in destroyed_ids
         }
         self._satellites = updates
+        self._autopilots = {
+            satellite_id: autopilot_updates[satellite_id] for satellite_id in updates
+        }
+        self._safety_reasons = {
+            satellite_id: safety_updates[satellite_id] for satellite_id in updates
+        }
         self._elapsed_seconds += simulation_duration_s
         return self.snapshot()
 
     def snapshot(self) -> WorldSnapshot:
         satellites = tuple(
-            _snapshot(self._satellites[satellite_id])
+            _snapshot(
+                self._satellites[satellite_id],
+                self._autopilots[satellite_id],
+                self._safety_reasons[satellite_id],
+            )
             for satellite_id in sorted(self._satellites)
         )
         return WorldSnapshot(
@@ -290,6 +336,7 @@ def _cartesian_state(
 def _advance_state(
     state: SatelliteState,
     ephemeris: EarthMoonEphemeris,
+    command: ActuatorCommand,
     duration_s: float,
 ) -> SatelliteState:
     primary = state.primary_body_id
@@ -306,7 +353,6 @@ def _advance_state(
             OccludingBody(other.position_m, other_radius_m),
         ),
     )
-    command = _actuator_command(state)
     result = advance_vehicle(
         state.definition,
         state.translation,
@@ -334,17 +380,107 @@ def _advance_state(
     )
 
 
-def _actuator_command(state: SatelliteState) -> ActuatorCommand:
-    if state.control_mode is not ControlMode.MANUAL:
-        return ActuatorCommand(0.0, np.zeros(3), np.zeros(3))
+def _control_request(
+    state: SatelliteState,
+    autopilot: AutopilotState,
+    previous_safety_reason: SafetyReason,
+    duration_s: float,
+) -> tuple[SatelliteState, AutopilotState, SafetyDecision]:
+    if _autopilot_is_quiescent(state, autopilot):
+        return (
+            state,
+            autopilot,
+            SafetyDecision(
+                ActuatorCommand(0.0, np.zeros(3), np.zeros(3)),
+                SafetyReason.CLEAR,
+            ),
+        )
+    snapshot = _snapshot(state, autopilot, previous_safety_reason)
+    telemetry = SafetyTelemetry()
+    if state.control_mode is ControlMode.MANUAL:
+        command = _manual_command(state)
+        decision = manual_control(command, state.vehicle, state.definition, telemetry)
+        cancelled = autopilot_step(
+            autopilot,
+            snapshot,
+            state.vehicle,
+            state.definition,
+            telemetry,
+            duration_s,
+        )
+        return state, cancelled.state, decision
+
+    objective, pending_commands = _next_objective(state, autopilot)
+    if objective is not autopilot.objective:
+        autopilot = replace(autopilot, plan=None, execution=None)
+    output = autopilot_step(
+        autopilot,
+        snapshot,
+        state.vehicle,
+        state.definition,
+        telemetry,
+        duration_s,
+        objective=objective,
+    )
+    vehicle = state.vehicle
+    planning_finished = (
+        output.state.plan is not None or output.state.planning_failure is not None
+    )
+    if vehicle.requires_replan and planning_finished:
+        vehicle = replace(vehicle, requires_replan=False)
+    return (
+        replace(state, vehicle=vehicle, pending_commands=pending_commands),
+        output.state,
+        output.decision,
+    )
+
+
+def _autopilot_is_quiescent(state: SatelliteState, autopilot: AutopilotState) -> bool:
+    execution = autopilot.execution
+    return (
+        state.control_mode is ControlMode.AUTONOMOUS
+        and not state.pending_commands
+        and not state.vehicle.requires_replan
+        and execution is not None
+        and execution.status is ExecutionStatus.COMPLETED
+    )
+
+
+def _manual_command(state: SatelliteState) -> ManualActuation:
     for command in reversed(state.pending_commands):
         if isinstance(command, ManualActuation):
-            return ActuatorCommand(
-                command.main_throttle,
-                np.asarray(command.wheel_torque_n_m),
-                np.asarray(command.rcs_torque_n_m),
+            return command
+    return ManualActuation(0.0, (0.0, 0.0, 0.0), (0.0, 0.0, 0.0))
+
+
+def _next_objective(
+    state: SatelliteState, autopilot: AutopilotState
+) -> tuple[FlightObjective, tuple[SatelliteCommand, ...]]:
+    for index, command in enumerate(state.pending_commands):
+        if isinstance(
+            command,
+            MaintainOrbit | SetOrbitAltitude | SetApsides | SetInclination | Deorbit,
+        ):
+            objective = FlightObjective(
+                f"user-{state.definition.id}-{type(command).__name__}",
+                ObjectivePriority.USER_COMMAND,
+                command,
             )
-    return ActuatorCommand(0.0, np.zeros(3), np.zeros(3))
+            pending = (
+                *state.pending_commands[:index],
+                *state.pending_commands[index + 1 :],
+            )
+            return objective, pending
+    if autopilot.objective is not None:
+        return autopilot.objective, state.pending_commands
+    return (
+        FlightObjective(
+            f"maintenance-{state.definition.id}",
+            ObjectivePriority.ORBIT_MAINTENANCE,
+            MaintainOrbit(),
+        ),
+        state.pending_commands,
+    )
 
 
 def _command_rejection(
@@ -371,7 +507,11 @@ def _command_rejection(
     return None
 
 
-def _snapshot(state: SatelliteState) -> SatelliteSnapshot:
+def _snapshot(
+    state: SatelliteState,
+    autopilot: AutopilotState,
+    safety_reason: SafetyReason,
+) -> SatelliteSnapshot:
     translation = state.translation
     attitude = state.vehicle.attitude
     resources = state.vehicle.resources
@@ -391,6 +531,14 @@ def _snapshot(state: SatelliteState) -> SatelliteSnapshot:
         state.control_mode,
         len(state.pending_commands),
         state.vehicle.requires_replan,
+        None if autopilot.plan is None else autopilot.plan.objective_id,
+        None if autopilot.execution is None else autopilot.execution.status.value,
+        (
+            None
+            if autopilot.planning_failure is None
+            else autopilot.planning_failure.reason
+        ),
+        safety_reason.value,
     )
 
 
@@ -412,9 +560,11 @@ def _state_is_valid(state: SatelliteState) -> bool:
         attitude.angular_velocity_rad_s,
         attitude.wheel_momentum_n_m_s,
     )
-    values_are_finite = all(bool(np.all(np.isfinite(values))) for values in arrays)
+    values_are_finite = bool(np.all(np.isfinite(np.concatenate(arrays))))
     mass_is_valid = isfinite(translation.mass_kg) and translation.mass_kg > 0.0
-    quaternion_norm = float(np.linalg.norm(attitude.quaternion_wxyz))
+    quaternion_norm = float(
+        np.sqrt(np.dot(attitude.quaternion_wxyz, attitude.quaternion_wxyz))
+    )
     quaternion_is_valid = abs(quaternion_norm - 1.0) <= QUATERNION_NORM_TOLERANCE
     return values_are_finite and mass_is_valid and quaternion_is_valid
 

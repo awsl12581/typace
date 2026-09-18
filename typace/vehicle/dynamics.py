@@ -197,13 +197,19 @@ def _advance_substep(
             allow_analytic=allow_analytic,
         )
         rcs_torque = output.rcs_torque_n_m if rcs_active else np.zeros(3)
-        current_attitude = integrate_attitude(
-            current_attitude,
-            output.wheel_torque_n_m,
-            rcs_torque,
-            np.asarray(definition.inertia_diagonal_kg_m2),
-            segment_duration_s,
+        attitude_is_stationary = (
+            not np.any(current_attitude.angular_velocity_rad_s)
+            and not np.any(output.wheel_torque_n_m)
+            and not np.any(rcs_torque)
         )
+        if not attitude_is_stationary:
+            current_attitude = integrate_attitude(
+                current_attitude,
+                output.wheel_torque_n_m,
+                rcs_torque,
+                np.asarray(definition.inertia_diagonal_kg_m2),
+                segment_duration_s,
+            )
         current_resources = _consume_flows(
             current_resources,
             main_mass_flow,

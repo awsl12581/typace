@@ -18,9 +18,15 @@ from typace.vehicle.state import VehicleState
 from typace.flight.attitude_control import AttitudeControllerState
 from typace.flight.execution import (
     ExecutionState,
+    ExecutionStatus,
     execute_plan,
 )
-from typace.flight.models import FlightPlan, PlanningFailure, PlanningResult
+from typace.flight.models import (
+    FlightPlan,
+    PlanningFailure,
+    PlanningFailureCode,
+    PlanningResult,
+)
 from typace.flight.navigation import NavigationState, update_navigation
 from typace.flight.objectives import FlightObjective
 from typace.flight.planning.orbit import plan_orbit_command
@@ -66,7 +72,25 @@ def autopilot_step(
     objective: FlightObjective | None = None,
     planned_result: PlanningResult | None = None,
 ) -> AutopilotOutput:
-    navigation = update_navigation(state.navigation, snapshot)
+    objective_changed = objective is not None and objective != state.objective
+    navigation_refresh_needed = (
+        state.navigation.solution is None
+        or vehicle.requires_replan
+        or objective_changed
+    )
+    navigation_failure: PlanningFailure | None = None
+    try:
+        navigation = (
+            update_navigation(state.navigation, snapshot)
+            if navigation_refresh_needed
+            else state.navigation
+        )
+    except (ArithmeticError, ValueError):
+        navigation = state.navigation
+        navigation_failure = PlanningFailure(
+            PlanningFailureCode.INVALID_TARGET,
+            "current state does not define a plannable orbit",
+        )
     if snapshot.control_mode is not ControlMode.AUTONOMOUS:
         cancelled = AutopilotState(
             navigation,
@@ -78,14 +102,27 @@ def autopilot_step(
         return AutopilotOutput(cancelled, _idle_decision())
 
     selected_objective = objective if objective is not None else state.objective
-    result = planned_result
-    needs_plan = state.plan is None or vehicle.requires_replan
+    result = planned_result if planned_result is not None else navigation_failure
+    has_no_planning_result = state.plan is None and state.planning_failure is None
+    needs_plan = objective_changed or has_no_planning_result or vehicle.requires_replan
     if needs_plan and result is None and selected_objective is not None:
-        result = _plan_objective(navigation, definition, selected_objective)
+        try:
+            result = _plan_objective(navigation, definition, selected_objective)
+        except (ArithmeticError, ValueError):
+            result = PlanningFailure(
+                PlanningFailureCode.UNREACHABLE,
+                "current state cannot produce a flight plan",
+            )
     plan, failure = _resolve_plan(state.plan, result, needs_plan)
     execution = state.execution
     if plan is not None and (execution is None or execution.plan != plan):
         execution = ExecutionState(plan)
+    execution_is_terminal = execution is not None and execution.status in (
+        ExecutionStatus.COMPLETED,
+        ExecutionStatus.ABORTED,
+    )
+    if not needs_plan and execution_is_terminal:
+        return AutopilotOutput(state, _idle_decision())
     if execution is None:
         idle = AutopilotState(
             navigation,
