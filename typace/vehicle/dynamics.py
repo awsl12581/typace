@@ -51,6 +51,13 @@ def resolve_actuators(
         raise ValueError("main throttle must be between zero and one")
     if state.power_mode is PowerMode.POWER_SAFE:
         return _idle_output()
+    command_is_idle = (
+        command.main_throttle == 0.0
+        and not np.any(command.wheel_torque_n_m)
+        and not np.any(command.rcs_torque_n_m)
+    )
+    if command_is_idle:
+        return _idle_output()
 
     propulsion = definition.propulsion
     throttle = command.main_throttle
@@ -129,6 +136,7 @@ def advance_vehicle(
             command,
             power_environment,
             step_duration_s,
+            allow_analytic=step_duration_s >= maximum_step_s,
         )
     return VehicleStepResult(current_translation, current_vehicle)
 
@@ -141,6 +149,8 @@ def _advance_substep(
     command: ActuatorCommand,
     power_environment: PowerEnvironment,
     duration_s: float,
+    *,
+    allow_analytic: bool,
 ) -> tuple[TranslationalState, VehicleState]:
     output = resolve_actuators(definition, vehicle, command, duration_s)
     boundaries = sorted(
@@ -184,7 +194,7 @@ def _advance_substep(
             context,
             segment_duration_s,
             segment_duration_s,
-            allow_analytic=True,
+            allow_analytic=allow_analytic,
         )
         rcs_torque = output.rcs_torque_n_m if rcs_active else np.zeros(3)
         current_attitude = integrate_attitude(

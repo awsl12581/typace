@@ -59,8 +59,15 @@ def atmospheric_density_kg_m3(altitude_m: float) -> float:
 def atmosphere_relative_velocity_m_s(
     position_m: Vector, inertial_velocity_m_s: Vector, rotation_rate_rad_s: float
 ) -> Vector:
-    rotation = np.asarray((0.0, 0.0, rotation_rate_rad_s), dtype=np.float64)
-    return inertial_velocity_m_s - np.cross(rotation, position_m)
+    atmosphere_velocity_m_s = np.asarray(
+        (
+            -rotation_rate_rad_s * position_m[1],
+            rotation_rate_rad_s * position_m[0],
+            0.0,
+        ),
+        dtype=np.float64,
+    )
+    return inertial_velocity_m_s - atmosphere_velocity_m_s
 
 
 def dynamic_pressure_pa(density_kg_m3: float, relative_velocity_m_s: Vector) -> float:

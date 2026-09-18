@@ -3,9 +3,9 @@
 ## Recovery point
 
 - Mission CSV: `2026-09-17_20-12-44-autonomous-satellite-simulation.csv`
-- Last code commit: `94a261b`
-- Last completed implementation: `WIRE-01` production wiring
-- Next execution item: reconcile and close `WIRE-01`, then run `REVIEW-01`
+- Last code commit: pending WIRE-01 closure commit
+- Last completed implementation: `WIRE-01` production wiring and acceptance closure
+- Next execution item: run `REVIEW-01`
 
 ## Completed before interruption
 
@@ -25,14 +25,11 @@
 - `conda run -n typace python -m unittest discover -s tests -v`: 75 passed, 3 skipped.
 - Skips are the existing platform-gated SDL/OpenGL and Windows-only tests; no test failure remains.
 
-## State reconciliation required
+## State reconciliation completed
 
-The CSV currently records `WIRE-01` and `REVIEW-01` as `未开始` / `未提交`, although the WIRE implementation is committed. On resume:
-
-1. Read the CSV and verify the commit and working tree against the WIRE acceptance criteria.
-2. Write the WIRE evidence and completion states back to the CSV, without claiming unperformed real-SDL or CUA evidence.
-3. Execute the required closing review for all claims and create its review log and humanized handoff.
-4. If review finds a current-scope gap, append a follow-up issue before closing the review.
+`WIRE-01` is closed in the CSV with current verification evidence. The next
+resume point is the required closing review, including its review log,
+humanized handoff, and contract check.
 
 ## Constraints to preserve
 

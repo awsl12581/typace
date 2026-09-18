@@ -37,6 +37,8 @@ def normalize_quaternion(quaternion_wxyz: Vector) -> Vector:
 
 
 def rotate_body_to_inertial(quaternion_wxyz: Vector, body_vector: Vector) -> Vector:
+    if np.array_equal(quaternion_wxyz, np.asarray((1.0, 0.0, 0.0, 0.0))):
+        return body_vector
     quaternion = normalize_quaternion(quaternion_wxyz)
     conjugate = quaternion * np.asarray((1.0, -1.0, -1.0, -1.0))
     pure_vector = np.concatenate((np.asarray((0.0,)), body_vector))
@@ -59,6 +61,13 @@ def integrate_attitude(
     if np.any(inertia_diagonal_kg_m2 <= 0.0):
         raise ValueError("inertia must be positive")
     torque_n_m = wheel_torque_n_m + external_torque_n_m
+    is_stationary = not np.any(state.angular_velocity_rad_s) and not np.any(torque_n_m)
+    if is_stationary:
+        return AttitudeState(
+            state.quaternion_wxyz,
+            state.angular_velocity_rad_s,
+            state.wheel_momentum_n_m_s - wheel_torque_n_m * duration_s,
+        )
     first = _attitude_derivative(
         state.quaternion_wxyz,
         state.angular_velocity_rad_s,

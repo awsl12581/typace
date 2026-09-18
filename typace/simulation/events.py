@@ -16,6 +16,7 @@ class DestructionCause(StrEnum):
     SURFACE_IMPACT = "surface_impact"
     DYNAMIC_PRESSURE = "dynamic_pressure"
     HEAT_FLUX = "heat_flux"
+    NUMERICAL_FAILURE = "numerical_failure"
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,14 +46,8 @@ def locate_destruction_time_s(
     relative_velocity_at: Callable[[TranslationalState], np.ndarray],
 ) -> tuple[float, DestructionCause] | None:
     initial = state_at(0.0)
-    if _surface_value(satellite, initial) <= 0.0:
-        return 0.0, DestructionCause.SURFACE_IMPACT
-    if _dynamic_pressure_value(satellite, initial, relative_velocity_at) <= 0.0:
-        return 0.0, DestructionCause.DYNAMIC_PRESSURE
-    if _heat_flux_value(satellite, initial, relative_velocity_at) <= 0.0:
-        return 0.0, DestructionCause.HEAT_FLUX
-    candidates: list[tuple[float, DestructionCause]] = []
-    for cause, value in (
+    final = state_at(duration_s)
+    checks = (
         (
             DestructionCause.SURFACE_IMPACT,
             lambda state: _surface_value(satellite, state),
@@ -67,11 +62,15 @@ def locate_destruction_time_s(
             DestructionCause.HEAT_FLUX,
             lambda state: _heat_flux_value(satellite, state, relative_velocity_at),
         ),
-    ):
-        try:
-            candidates.append((locate_event_time_s(duration_s, state_at, value), cause))
-        except ValueError:
+    )
+    candidates: list[tuple[float, DestructionCause]] = []
+    for cause, value in checks:
+        initial_value = value(initial)
+        if initial_value <= 0.0:
+            return 0.0, cause
+        if value(final) > 0.0:
             continue
+        candidates.append((locate_event_time_s(duration_s, state_at, value), cause))
     return min(candidates, default=None)
 
 

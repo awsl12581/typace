@@ -18,6 +18,7 @@ from typace.config.simulation import (
     PHYSICS_STEP_SECONDS,
     TIME_WARPS,
 )
+from typace.config.vehicle import QUATERNION_NORM_TOLERANCE
 from typace.physics.elements import CartesianState, ClassicalElements, elements_to_state
 from typace.physics.bodies import force_model_for
 from typace.physics.environment import OccludingBody
@@ -159,15 +160,38 @@ class SimulationWorld:
         frozen_states = tuple(
             self._satellites[satellite_id] for satellite_id in sorted(self._satellites)
         )
-        updates = {
-            state.definition.id: _advance_state(state, ephemeris, simulation_duration_s)
-            for state in frozen_states
-        }
+        updates: dict[str, SatelliteState] = {}
+        failure_events: list[DestructionEvent] = []
+        for state in frozen_states:
+            try:
+                update = _advance_state(state, ephemeris, simulation_duration_s)
+            except Exception:
+                update = None
+            if update is None or not _state_is_valid(update):
+                failure_events.append(
+                    DestructionEvent(
+                        f"numerical_failure-{state.definition.id}-{self._elapsed_seconds + simulation_duration_s:.6f}",
+                        self._elapsed_seconds + simulation_duration_s,
+                        (state.definition.id,),
+                        DestructionCause.NUMERICAL_FAILURE,
+                    )
+                )
+                continue
+            updates[state.definition.id] = update
+        healthy_previous = tuple(
+            state for state in frozen_states if state.definition.id in updates
+        )
         events = _detect_destructions(
-            tuple(self._satellites.values()),
+            healthy_previous,
             updates,
             self._elapsed_seconds,
             simulation_duration_s,
+        )
+        events = tuple(
+            sorted(
+                (*failure_events, *events),
+                key=lambda event: (event.elapsed_seconds, event.event_id),
+            )
         )
         destroyed_ids = {
             satellite_id for event in events for satellite_id in event.satellite_ids
@@ -378,6 +402,23 @@ def _quaternion(values: np.ndarray) -> tuple[float, float, float, float]:
     return float(values[0]), float(values[1]), float(values[2]), float(values[3])
 
 
+def _state_is_valid(state: SatelliteState) -> bool:
+    translation = state.translation
+    attitude = state.vehicle.attitude
+    arrays = (
+        translation.position_m,
+        translation.velocity_m_s,
+        attitude.quaternion_wxyz,
+        attitude.angular_velocity_rad_s,
+        attitude.wheel_momentum_n_m_s,
+    )
+    values_are_finite = all(bool(np.all(np.isfinite(values))) for values in arrays)
+    mass_is_valid = isfinite(translation.mass_kg) and translation.mass_kg > 0.0
+    quaternion_norm = float(np.linalg.norm(attitude.quaternion_wxyz))
+    quaternion_is_valid = abs(quaternion_norm - 1.0) <= QUATERNION_NORM_TOLERANCE
+    return values_are_finite and mass_is_valid and quaternion_is_valid
+
+
 def _detect_destructions(
     previous: tuple[SatelliteState, ...],
     updates: dict[str, SatelliteState],
@@ -407,44 +448,70 @@ def _detect_destructions(
                     cause,
                 )
             )
-    active = tuple(
-        state
-        for satellite_id, state in sorted(updates.items())
-        if satellite_id not in {event.satellite_ids[0] for event in events}
-    )
     destroyed = {
         satellite_id for event in events for satellite_id in event.satellite_ids
     }
     remaining = tuple(
         state for state in previous if state.definition.id not in destroyed
     )
-    for index, first_before in enumerate(remaining):
-        for second_before in remaining[index + 1 :]:
-            if first_before.primary_body_id != second_before.primary_body_id:
-                continue
-            first_after = updates[first_before.definition.id]
-            second_after = updates[second_before.definition.id]
-            collision_time_s = _collision_time_s(
-                first_before,
-                first_after,
-                second_before,
-                second_after,
-                duration_s,
+    for first_index, second_index in _collision_candidates(remaining, updates):
+        first_before = remaining[first_index]
+        second_before = remaining[second_index]
+        first_after = updates[first_before.definition.id]
+        second_after = updates[second_before.definition.id]
+        collision_time_s = _collision_time_s(
+            first_before,
+            first_after,
+            second_before,
+            second_after,
+            duration_s,
+        )
+        if collision_time_s is None:
+            continue
+        first_id = min(first_before.definition.id, second_before.definition.id)
+        second_id = max(first_before.definition.id, second_before.definition.id)
+        events.append(
+            DestructionEvent(
+                f"collision-{first_id}-{second_id}-{elapsed_seconds + collision_time_s:.6f}",
+                elapsed_seconds + collision_time_s,
+                (first_id, second_id),
+                DestructionCause.COLLISION,
             )
-            if collision_time_s is None:
-                continue
-            first_id = min(first_before.definition.id, second_before.definition.id)
-            second_id = max(first_before.definition.id, second_before.definition.id)
-            events.append(
-                DestructionEvent(
-                    f"collision-{first_id}-{second_id}-{elapsed_seconds + collision_time_s:.6f}",
-                    elapsed_seconds + collision_time_s,
-                    (first_id, second_id),
-                    DestructionCause.COLLISION,
-                )
-            )
+        )
     return tuple(
         sorted(events, key=lambda event: (event.elapsed_seconds, event.event_id))
+    )
+
+
+def _collision_candidates(
+    previous: tuple[SatelliteState, ...], updates: dict[str, SatelliteState]
+) -> tuple[tuple[int, int], ...]:
+    if len(previous) < 2:
+        return ()
+    start = np.stack(tuple(state.translation.position_m for state in previous))
+    end = np.stack(
+        tuple(updates[state.definition.id].translation.position_m for state in previous)
+    )
+    relative_start = start[:, None, :] - start[None, :, :]
+    relative_motion = (end - start)[:, None, :] - (end - start)[None, :, :]
+    motion_squared = np.sum(relative_motion * relative_motion, axis=2)
+    dot = np.sum(relative_start * relative_motion, axis=2)
+    fractions = np.zeros_like(motion_squared)
+    np.divide(-dot, motion_squared, out=fractions, where=motion_squared > 0.0)
+    np.clip(fractions, 0.0, 1.0, out=fractions)
+    closest = relative_start + relative_motion * fractions[:, :, None]
+    distance_squared = np.sum(closest * closest, axis=2)
+    radii = np.asarray(tuple(state.definition.collision_radius_m for state in previous))
+    combined_radii_squared = (radii[:, None] + radii[None, :]) ** 2
+    same_primary = np.equal.outer(
+        tuple(state.primary_body_id for state in previous),
+        tuple(state.primary_body_id for state in previous),
+    )
+    candidate_mask = np.triu(
+        same_primary & (distance_squared <= combined_radii_squared), k=1
+    )
+    return tuple(
+        (int(first), int(second)) for first, second in np.argwhere(candidate_mask)
     )
 
 
