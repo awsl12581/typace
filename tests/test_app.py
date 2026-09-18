@@ -2,6 +2,7 @@ import hashlib
 import ctypes
 import os
 from math import sin
+import asyncio
 from pathlib import Path
 import sys
 import unittest
@@ -169,6 +170,9 @@ class SolarSystemInteractionTests(unittest.IsolatedAsyncioTestCase):
             view.zoom = 200.0
             self.assertIn("▤▤│◆│▤▤", view.render().plain)
             application._advance_world()
+            world_step = application._world_step_future
+            if world_step is not None:
+                await asyncio.wrap_future(world_step)
             self.assertGreater(
                 application.world.snapshot().elapsed_seconds, initial_elapsed_s
             )

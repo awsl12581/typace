@@ -78,6 +78,7 @@ def autopilot_step(
     planned_result: PlanningResult | None = None,
     transfer_target: TransferTarget | None = None,
     conjunction_risk: ConjunctionRisk | None = None,
+    planning_pending: bool = False,
 ) -> AutopilotOutput:
     objective_changed = objective is not None and objective != state.objective
     navigation_primary_changed = (
@@ -117,9 +118,16 @@ def autopilot_step(
     result = planned_result if planned_result is not None else navigation_failure
     has_no_planning_result = state.plan is None and state.planning_failure is None
     needs_plan = objective_changed or has_no_planning_result or vehicle.requires_replan
-    if needs_plan and result is None and selected_objective is not None:
+    should_plan_now = (
+        needs_plan
+        and result is None
+        and selected_objective is not None
+        and not planning_pending
+    )
+    if should_plan_now:
+        assert selected_objective is not None
         try:
-            result = _plan_objective(
+            result = plan_objective(
                 navigation,
                 definition,
                 selected_objective,
@@ -131,7 +139,9 @@ def autopilot_step(
                 PlanningFailureCode.UNREACHABLE,
                 "current state cannot produce a flight plan",
             )
-    plan, failure = _resolve_plan(state.plan, result, needs_plan)
+    plan, failure = _resolve_plan(
+        state.plan, state.planning_failure, result, needs_plan
+    )
     execution = state.execution
     if plan is not None and (execution is None or execution.plan != plan):
         execution = ExecutionState(plan)
@@ -170,7 +180,7 @@ def autopilot_step(
     return AutopilotOutput(updated, output.decision)
 
 
-def _plan_objective(
+def plan_objective(
     navigation: NavigationState,
     definition: SatelliteDefinition,
     objective: FlightObjective,
@@ -202,11 +212,12 @@ def _plan_objective(
 
 def _resolve_plan(
     existing: FlightPlan | None,
+    existing_failure: PlanningFailure | None,
     result: PlanningResult | None,
     needs_plan: bool,
 ) -> tuple[FlightPlan | None, PlanningFailure | None]:
     if not needs_plan:
-        return existing, None
+        return existing, existing_failure
     if isinstance(result, FlightPlan):
         return result, None
     if isinstance(result, PlanningFailure):

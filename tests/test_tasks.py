@@ -1,3 +1,4 @@
+import os
 import threading
 import unittest
 
@@ -27,6 +28,14 @@ class ThreadTaskManagerTests(unittest.TestCase):
             first.result()
             second.result()
             self.assertEqual(events, [1, 2])
+        finally:
+            manager.shutdown()
+
+    def test_planning_uses_dedicated_process(self) -> None:
+        manager = ThreadTaskManager(compute_workers=1)
+        try:
+            future = manager.submit_planning(os.getpid)
+            self.assertNotEqual(future.result(), os.getpid())
         finally:
             manager.shutdown()
 

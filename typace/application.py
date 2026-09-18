@@ -457,6 +457,8 @@ class TyPaceApp(App[None]):
         self.call_from_thread(self._apply_world_step, future)
 
     def _apply_world_step(self, future: Future[WorldSnapshot]) -> None:
+        if future is not self._world_step_future:
+            return
         self._world_step_future = None
         snapshot = future.result()
         self.satellite_panel.set_snapshot(snapshot)
@@ -572,6 +574,10 @@ class TyPaceApp(App[None]):
         if result is None:
             self.celestial_view.focus()
             return
+        if self._world_step_future is not None:
+            self._world_step_future.result()
+            self._world_step_future = None
+        self._pending_real_seconds = 0.0
         self._ui_locale = result.locale
         self.status_bar.set_locale(result.locale)
         self.hint_strip.update(_hint_text(result.locale))

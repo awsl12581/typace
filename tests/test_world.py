@@ -1,6 +1,8 @@
+from concurrent.futures import Future
 from dataclasses import replace
 from time import perf_counter
 import unittest
+from unittest.mock import patch
 
 from astropy.time import TimeDelta
 import numpy as np
@@ -12,6 +14,7 @@ from typace.config.simulation import (
     UI_REFRESH_HZ,
     UPDATE_P95_BUDGET_SECONDS,
 )
+from typace.flight.models import PlanningFailure, PlanningFailureCode, PlanningResult
 from typace.satellites import load_catalog
 from typace.satellites.commands import (
     CommandStatus,
@@ -32,6 +35,7 @@ from typace.simulation import SimulationWorld
 from typace.simulation.ephemeris import ephemeris_at
 from typace.simulation.events import DestructionCause
 from typace.simulation.world import _transition_primary
+from typace.tasks import ThreadTaskManager
 from typace.vehicle.power import PowerMode
 
 
@@ -399,6 +403,62 @@ class SimulationWorldTests(unittest.TestCase):
             snapshot.destruction_events[-1].cause,
             DestructionCause.NUMERICAL_FAILURE,
         )
+
+    def test_parallel_step_plans_each_objective_once_in_background(self) -> None:
+        deferred: list[Future[PlanningResult]] = []
+
+        def defer_planning(
+            _function: object, _request: object
+        ) -> Future[PlanningResult]:
+            future: Future[PlanningResult] = Future()
+            deferred.append(future)
+            return future
+
+        world = SimulationWorld.from_catalog(self.catalog)
+        tasks = ThreadTaskManager(compute_workers=2)
+        try:
+            with patch.object(
+                tasks,
+                "submit_planning",
+                side_effect=defer_planning,
+            ):
+                first = world.step_parallel(1.0 / UI_REFRESH_HZ, tasks)
+                initial_futures = tuple(
+                    pending.future for pending in world._pending_plans.values()
+                )
+
+                second = world.step_parallel(1.0 / UI_REFRESH_HZ, tasks)
+                repeated_futures = tuple(
+                    pending.future for pending in world._pending_plans.values()
+                )
+
+                self.assertTrue(
+                    all(item.plan_objective_id is None for item in first.satellites)
+                )
+                self.assertEqual(initial_futures, repeated_futures)
+                self.assertEqual(first.elapsed_seconds, 1.0 / UI_REFRESH_HZ)
+                self.assertEqual(second.elapsed_seconds, 2.0 / UI_REFRESH_HZ)
+
+                for future in initial_futures:
+                    future.set_result(
+                        PlanningFailure(
+                            PlanningFailureCode.NO_CORRECTION,
+                            "background plan",
+                        )
+                    )
+
+                planned = world.step_parallel(1.0 / UI_REFRESH_HZ, tasks)
+                world.step_parallel(1.0 / UI_REFRESH_HZ, tasks)
+
+                self.assertTrue(
+                    all(
+                        item.planning_failure == "background plan"
+                        for item in planned.satellites
+                    )
+                )
+                self.assertFalse(world._pending_plans)
+        finally:
+            tasks.shutdown()
 
     def test_sixty_four_satellite_update_p95_meets_budget(self) -> None:
         definitions = []

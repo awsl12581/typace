@@ -1,5 +1,6 @@
 """Single-clock deterministic multi-satellite world."""
 
+from concurrent.futures import Future
 from dataclasses import dataclass, replace
 from math import isfinite, pi, radians, sqrt
 from typing import cast
@@ -16,10 +17,12 @@ from typace.config.simulation import (
     TIME_WARPS,
 )
 from typace.config.vehicle import QUATERNION_NORM_TOLERANCE
-from typace.flight.autopilot import AutopilotState, autopilot_step
+from typace.flight.autopilot import AutopilotState, autopilot_step, plan_objective
 from typace.flight.conjunction import ConjunctionCandidate, screen_conjunctions
 from typace.flight.execution import ExecutionStatus
+from typace.flight.models import PlanningFailure, PlanningFailureCode, PlanningResult
 from typace.flight.manual import manual_control
+from typace.flight.navigation import NavigationState
 from typace.flight.objectives import FlightObjective, ObjectivePriority
 from typace.flight.planning.avoidance import ConjunctionRisk
 from typace.flight.planning.transfer import TransferTarget
@@ -94,12 +97,39 @@ class _SatelliteStepInput:
     duration_s: float
     ephemeris: SolarSystemEphemeris
     conjunction: ConjunctionCandidate | None
+    ready_plan: "_ReadyPlan | None"
+    defer_planning: bool
 
 
 @dataclass(frozen=True, slots=True)
 class _SatelliteStepOutput:
     satellite_id: str
     controlled_update: tuple[SatelliteState, AutopilotState, SafetyDecision] | None
+    planning_request: "_PlanningRequest | None" = None
+
+
+@dataclass(frozen=True, slots=True)
+class _PlanningRequest:
+    satellite_id: str
+    primary_body_id: str
+    objective: FlightObjective
+    navigation: NavigationState
+    definition: SatelliteDefinition
+    transfer_target: TransferTarget | None
+    conjunction_risk: ConjunctionRisk | None
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingPlan:
+    primary_body_id: str
+    objective: FlightObjective
+    future: Future[PlanningResult]
+
+
+@dataclass(frozen=True, slots=True)
+class _ReadyPlan:
+    objective: FlightObjective
+    result: PlanningResult
 
 
 class SimulationWorld:
@@ -122,6 +152,7 @@ class SimulationWorld:
             satellite_id: SafetyReason.CLEAR for satellite_id in satellites
         }
         self._conjunction_alerts = {satellite_id: () for satellite_id in satellites}
+        self._pending_plans: dict[str, _PendingPlan] = {}
 
     @classmethod
     def from_catalog(
@@ -210,6 +241,7 @@ class SimulationWorld:
         )
         risks_by_satellite = _yielding_risks(conjunctions)
         conjunction_alerts = _conjunction_alerts(frozen_states, conjunctions)
+        ready_plans = self._ready_plans() if tasks is not None else {}
         updates: dict[str, SatelliteState] = {}
         autopilot_updates: dict[str, AutopilotState] = {}
         safety_updates: dict[str, SafetyReason] = {}
@@ -222,6 +254,8 @@ class SimulationWorld:
                 simulation_duration_s,
                 ephemeris,
                 risks_by_satellite.get(state.definition.id),
+                ready_plans.get(state.definition.id),
+                tasks is not None,
             )
             for state in frozen_states
         )
@@ -288,8 +322,51 @@ class SimulationWorld:
         self._conjunction_alerts = {
             satellite_id: conjunction_alerts[satellite_id] for satellite_id in updates
         }
+        if tasks is not None:
+            self._update_planning_tasks(step_outputs, updates, tasks)
         self._elapsed_seconds += simulation_duration_s
         return self.snapshot()
+
+    def _ready_plans(self) -> dict[str, _ReadyPlan]:
+        ready: dict[str, _ReadyPlan] = {}
+        for satellite_id, pending in tuple(self._pending_plans.items()):
+            if pending.future.cancelled():
+                self._pending_plans.pop(satellite_id)
+            elif pending.future.done():
+                ready[satellite_id] = _ReadyPlan(
+                    pending.objective, pending.future.result()
+                )
+        return ready
+
+    def _update_planning_tasks(
+        self,
+        outputs: tuple[_SatelliteStepOutput, ...],
+        updates: dict[str, SatelliteState],
+        tasks: ThreadTaskManager,
+    ) -> None:
+        requests = {
+            output.satellite_id: output.planning_request
+            for output in outputs
+            if output.satellite_id in updates
+        }
+        for satellite_id, pending in tuple(self._pending_plans.items()):
+            request = requests.get(satellite_id)
+            request_matches_pending = (
+                request is not None
+                and request.primary_body_id == pending.primary_body_id
+                and request.objective == pending.objective
+            )
+            if not request_matches_pending:
+                pending.future.cancel()
+                self._pending_plans.pop(satellite_id)
+        for satellite_id, request in requests.items():
+            if request is None or satellite_id in self._pending_plans:
+                continue
+            self._pending_plans[satellite_id] = _PendingPlan(
+                request.primary_body_id,
+                request.objective,
+                tasks.submit_planning(_run_planning_request, request),
+            )
 
     def snapshot(self) -> WorldSnapshot:
         satellites = tuple(
@@ -423,7 +500,14 @@ def _control_request(
     duration_s: float,
     ephemeris: SolarSystemEphemeris,
     conjunction: ConjunctionCandidate | None,
-) -> tuple[SatelliteState, AutopilotState, SafetyDecision]:
+    ready_plan: _ReadyPlan | None,
+    defer_planning: bool,
+) -> tuple[
+    SatelliteState,
+    AutopilotState,
+    SafetyDecision,
+    _PlanningRequest | None,
+]:
     if conjunction is None and _autopilot_is_quiescent(state, autopilot):
         return (
             state,
@@ -432,6 +516,7 @@ def _control_request(
                 ActuatorCommand(0.0, np.zeros(3), np.zeros(3)),
                 SafetyReason.CLEAR,
             ),
+            None,
         )
     snapshot = _snapshot(state, autopilot, previous_safety_reason, ())
     telemetry = SafetyTelemetry()
@@ -446,11 +531,27 @@ def _control_request(
             telemetry,
             duration_s,
         )
-        return state, cancelled.state, decision
+        return state, cancelled.state, decision, None
 
     objective, pending_commands = _next_objective(state, autopilot, conjunction)
     if objective is not autopilot.objective:
-        autopilot = replace(autopilot, plan=None, execution=None)
+        autopilot = replace(
+            autopilot,
+            plan=None,
+            execution=None,
+            planning_failure=None,
+        )
+    needs_plan = (
+        objective != autopilot.objective
+        or (autopilot.plan is None and autopilot.planning_failure is None)
+        or state.vehicle.requires_replan
+    )
+    planned_result = (
+        ready_plan.result
+        if ready_plan is not None and ready_plan.objective == objective
+        else None
+    )
+    plan_is_ready = planned_result is not None
     output = autopilot_step(
         autopilot,
         snapshot,
@@ -459,8 +560,10 @@ def _control_request(
         telemetry,
         duration_s,
         objective=objective,
+        planned_result=planned_result,
         transfer_target=_transfer_target(state, objective, ephemeris),
         conjunction_risk=_conjunction_risk(conjunction),
+        planning_pending=defer_planning and needs_plan and not plan_is_ready,
     )
 
     vehicle = state.vehicle
@@ -469,23 +572,48 @@ def _control_request(
     )
     if vehicle.requires_replan and planning_finished:
         vehicle = replace(vehicle, requires_replan=False)
+    controlled_state = replace(
+        state, vehicle=vehicle, pending_commands=pending_commands
+    )
+    planning_request = None
+    planning_is_needed = (
+        defer_planning
+        and needs_plan
+        and not plan_is_ready
+        and output.state.plan is None
+        and output.state.planning_failure is None
+    )
+    navigation = output.state.navigation
+    if planning_is_needed and navigation.solution is not None:
+        planning_request = _PlanningRequest(
+            state.definition.id,
+            state.primary_body_id,
+            objective,
+            navigation,
+            state.definition,
+            _transfer_target(state, objective, ephemeris),
+            _conjunction_risk(conjunction),
+        )
     return (
-        replace(state, vehicle=vehicle, pending_commands=pending_commands),
+        controlled_state,
         output.state,
         output.decision,
+        planning_request,
     )
 
 
 def _advance_satellite(value: _SatelliteStepInput) -> _SatelliteStepOutput:
     satellite_id = value.state.definition.id
     try:
-        controlled_state, autopilot, decision = _control_request(
+        controlled_state, autopilot, decision, planning_request = _control_request(
             value.state,
             value.autopilot,
             value.previous_safety_reason,
             value.duration_s,
             value.ephemeris,
             value.conjunction,
+            value.ready_plan,
+            value.defer_planning,
         )
         update = _advance_state(
             controlled_state,
@@ -497,7 +625,27 @@ def _advance_satellite(value: _SatelliteStepInput) -> _SatelliteStepOutput:
         controlled_update = update, autopilot, decision
     except Exception:
         controlled_update = None
-    return _SatelliteStepOutput(satellite_id, controlled_update)
+        planning_request = None
+    return _SatelliteStepOutput(satellite_id, controlled_update, planning_request)
+
+
+def _run_planning_request(request: _PlanningRequest) -> PlanningResult:
+    try:
+        result = plan_objective(
+            request.navigation,
+            request.definition,
+            request.objective,
+            request.transfer_target,
+            request.conjunction_risk,
+        )
+    except (ArithmeticError, ValueError):
+        result = None
+    if result is None:
+        return PlanningFailure(
+            PlanningFailureCode.UNREACHABLE,
+            "current state cannot produce a flight plan",
+        )
+    return result
 
 
 def _autopilot_is_quiescent(state: SatelliteState, autopilot: AutopilotState) -> bool:
