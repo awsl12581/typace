@@ -7,7 +7,11 @@ from typace.physics.bodies import force_model_for
 from typace.physics.elements import CartesianState, state_to_elements
 from typace.physics.frames import perifocal_to_inertial_matrix
 
-from typace.celestial.rendering import Basis
+from typace.celestial.rendering import (
+    Basis,
+    BRAILLE_COLUMNS_PER_CELL,
+    BRAILLE_ROWS_PER_CELL,
+)
 from typace.celestial.model import Vec3
 from typace.satellites.state import SatelliteSnapshot
 
@@ -23,7 +27,9 @@ SATELLITE_OUTLINE_MAX_PROJECTED_RADIUS = 1.5
 ORBIT_MINIMUM_SAMPLE_COUNT = 720
 ORBIT_MAXIMUM_SAMPLE_COUNT = 4_096
 ORBIT_SAMPLES_PER_PROJECTED_CELL = 2.0
-SATELLITE_DISPLAY_RADIUS_M = 100_000.0
+# Apparent horizontal radius: keeps the close model visible at maximum zoom
+# without affecting any physical size or collision calculation.
+SATELLITE_DISPLAY_RADIUS_M = 200_000.0
 SATELLITE_ORBIT_COLORS = (
     "#63d7ff",
     "#ffbf69",
@@ -86,6 +92,8 @@ def project_satellites(
     vertical_scale: float = 1.0,
 ) -> tuple[SatelliteMarker, ...]:
     markers: list[SatelliteMarker] = []
+    horizontal_scale = scale / BRAILLE_COLUMNS_PER_CELL
+    vertical_cell_scale = scale * vertical_scale / BRAILLE_ROWS_PER_CELL
     for palette_index, satellite in enumerate(satellites):
         primary_position = primary_positions_m.get(satellite.primary_body_id)
         if primary_position is None:
@@ -93,19 +101,22 @@ def project_satellites(
         inertial_position = primary_position + np.asarray(satellite.position_m)
         offset = inertial_position - center_m
         column = int(
-            round(columns / 2.0 + np.dot(offset, _basis_vector(basis.x)) * scale)
+            round(
+                columns / 2.0
+                + np.dot(offset, _basis_vector(basis.x)) * horizontal_scale
+            )
         )
         row = int(
             round(
                 rows / 2.0
-                - np.dot(offset, _basis_vector(basis.y)) * scale * vertical_scale
+                - np.dot(offset, _basis_vector(basis.y)) * vertical_cell_scale
             )
         )
         if not (0 <= column < columns and 0 <= row < rows):
             continue
         projected_radius = max(
-            satellite.mass_kg ** (1.0 / 3.0) * scale,
-            SATELLITE_DISPLAY_RADIUS_M * scale,
+            satellite.mass_kg ** (1.0 / 3.0) * horizontal_scale,
+            SATELLITE_DISPLAY_RADIUS_M * horizontal_scale,
         )
         color = satellite_color(satellite.id, palette_index)
         markers.append(
@@ -133,7 +144,7 @@ def project_satellites(
 def project_satellite_orbits(
     satellites: tuple[SatelliteSnapshot, ...],
     primary_positions_m: dict[str, np.ndarray],
-    primary_masses_kg: dict[str, float],
+    body_radii_m: dict[str, float],
     center_m: np.ndarray,
     scale: float,
     basis: Basis,
@@ -145,10 +156,11 @@ def project_satellite_orbits(
 ) -> tuple[SatelliteOrbit, ...]:
     """Project each satellite's osculating elliptic orbit into screen cells."""
     orbits: list[SatelliteOrbit] = []
+    horizontal_scale = scale / BRAILLE_COLUMNS_PER_CELL
+    vertical_cell_scale = scale * vertical_scale / BRAILLE_ROWS_PER_CELL
     for palette_index, satellite in enumerate(satellites):
         primary_position = primary_positions_m.get(satellite.primary_body_id)
-        primary_mass = primary_masses_kg.get(satellite.primary_body_id)
-        if primary_position is None or primary_mass is None:
+        if primary_position is None:
             continue
         mu = force_model_for(satellite.primary_body_id).gravitational_parameter_m3_s2
         try:
@@ -161,7 +173,9 @@ def project_satellite_orbits(
             )
         except (ValueError, FloatingPointError):
             continue
-        projected_circumference = 2.0 * np.pi * elements.semi_major_axis_m * scale
+        projected_circumference = (
+            2.0 * np.pi * elements.semi_major_axis_m * horizontal_scale
+        )
         sample_count = max(
             ORBIT_MINIMUM_SAMPLE_COUNT,
             min(
@@ -188,18 +202,29 @@ def project_satellite_orbits(
             elements.periapsis_argument_rad,
         )
         positions = (rotation @ perifocal_positions).T + primary_position
+        visible = _visible_orbit_samples(
+            positions,
+            primary_positions_m,
+            body_radii_m,
+            basis,
+        )
         offsets = positions - center_m
         projected_columns = np.rint(
-            columns / 2.0 + offsets @ _basis_vector(basis.x) * scale
+            columns / 2.0 + offsets @ _basis_vector(basis.x) * horizontal_scale
         ).astype(np.int64)
         projected_rows = np.rint(
-            rows / 2.0 - offsets @ _basis_vector(basis.y) * scale * vertical_scale
+            rows / 2.0 - offsets @ _basis_vector(basis.y) * vertical_cell_scale
         ).astype(np.int64)
         points = tuple(
             dict.fromkeys(
                 (int(column), int(row))
-                for column, row in zip(projected_columns, projected_rows, strict=True)
-                if 0 <= column < columns and 0 <= row < rows
+                for column, row, is_visible in zip(
+                    projected_columns,
+                    projected_rows,
+                    visible,
+                    strict=True,
+                )
+                if is_visible and 0 <= column < columns and 0 <= row < rows
             )
         )
         if points:
@@ -217,3 +242,24 @@ def project_satellite_orbits(
 
 def _basis_vector(vector: Vec3) -> np.ndarray:
     return np.asarray((vector.x, vector.y, vector.z))
+
+
+def _visible_orbit_samples(
+    positions_m: np.ndarray,
+    body_positions_m: dict[str, np.ndarray],
+    body_radii_m: dict[str, float],
+    basis: Basis,
+) -> np.ndarray:
+    visible = np.ones(len(positions_m), dtype=np.bool_)
+    camera_axis = _basis_vector(basis.depth)
+    for body_id, body_position in body_positions_m.items():
+        radius_m = body_radii_m.get(body_id)
+        if radius_m is None or radius_m <= 0.0:
+            continue
+        relative = positions_m - body_position
+        depth_m = relative @ camera_axis
+        projected = relative - depth_m[:, np.newaxis] * camera_axis
+        behind_body = depth_m < 0.0
+        inside_disk = np.einsum("ij,ij->i", projected, projected) < radius_m**2
+        visible &= ~(behind_body & inside_disk)
+    return visible

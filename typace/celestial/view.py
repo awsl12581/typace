@@ -16,6 +16,8 @@ from typace.celestial.model import (
 from typace.celestial.orbital import CelestialState, state_at
 from typace.celestial.rendering import (
     Basis,
+    BRAILLE_COLUMNS_PER_CELL,
+    BRAILLE_ROWS_PER_CELL,
     DiskRasterCache,
     OBLIQUE_BASIS,
     Scene,
@@ -54,8 +56,6 @@ MAX_ZOOM = 200.0
 # A conventional terminal cell is half as wide as it is tall, making each
 # point in a 2-by-4 Braille cell physically square.
 DEFAULT_TERMINAL_CELL_PIXEL_ASPECT_RATIO = 0.5
-BRAILLE_COLUMNS_PER_CELL = 2
-BRAILLE_ROWS_PER_CELL = 4
 SATELLITE_MODEL = ("  ╭─╮  ", "▤▤│◆│▤▤", "  ╰─╯  ")
 
 
@@ -147,6 +147,7 @@ class CelestialSystemView(Widget):
         self.pan_x = 0.0
         self.pan_y = 0.0
         self.focused_satellite_id = None
+        self._satellite_trails.clear()
         self.refresh()
 
     def set_cell_pixel_aspect_ratio(self, aspect_ratio: float) -> None:
@@ -250,12 +251,12 @@ class CelestialSystemView(Widget):
             body_id: np.asarray((position.x, position.y, position.z))
             for body_id, position in celestial_snapshot.positions.items()
         }
-        primary_masses = {body.id: body.mass_kg for body in self.system.bodies}
+        body_radii = {body.id: body.radius_m for body in self.system.bodies}
         center_vector = np.asarray((center.x, center.y, center.z))
         self.satellite_orbits = project_satellite_orbits(
             self.world_snapshot.satellites,
             primary_positions,
-            primary_masses,
+            body_radii,
             center_vector,
             scale,
             basis,
@@ -382,14 +383,17 @@ class CelestialSystemView(Widget):
 
     def action_zoom_in(self) -> None:
         self.zoom = min(MAX_ZOOM, self.zoom * ZOOM_STEP)
+        self._satellite_trails.clear()
         self.refresh()
 
     def action_zoom_out(self) -> None:
         self.zoom = max(MIN_ZOOM, self.zoom / ZOOM_STEP)
+        self._satellite_trails.clear()
         self.refresh()
 
     def action_cycle_view(self) -> None:
         self.view_index = (self.view_index + 1) % len(VIEW_MODES)
+        self._satellite_trails.clear()
         self.refresh()
 
     def _pan(self, horizontal: float, vertical: float) -> None:
@@ -404,6 +408,7 @@ class CelestialSystemView(Widget):
         )
         self.pan_x += horizontal * horizontal_distance
         self.pan_y += vertical * vertical_distance
+        self._satellite_trails.clear()
         self.refresh()
 
     def action_pan_left(self) -> None:

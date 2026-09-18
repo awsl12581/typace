@@ -1,3 +1,5 @@
+from dataclasses import replace
+from math import cos, radians, sin, sqrt
 import unittest
 
 import numpy as np
@@ -16,7 +18,16 @@ from typace.satellites.rendering import (
     project_satellite_orbits,
     project_satellites,
 )
-from typace.celestial.rendering import TOP_BASIS
+from typace.celestial.rendering import (
+    BRAILLE_COLUMNS_PER_CELL,
+    BRAILLE_ROWS_PER_CELL,
+    BrailleRaster,
+    Projector,
+    TOP_BASIS,
+)
+from typace.celestial.model import Vec3
+from typace.config.physics import EARTH_MEAN_RADIUS_M
+from typace.physics.bodies import force_model_for
 from typace.solar_system import load_solar_system
 from typace.satellites.widgets import SatellitePanel
 from typace.simulation import SimulationWorld
@@ -78,11 +89,11 @@ class SatelliteRenderingTests(unittest.TestCase):
         snapshot = SimulationWorld.from_catalog(load_catalog()).snapshot()
         system = load_solar_system()
         positions = {body.id: np.zeros(3) for body in system.bodies}
-        masses = {body.id: body.mass_kg for body in system.bodies}
+        radii = {body.id: body.radius_m for body in system.bodies}
         orbits = project_satellite_orbits(
             snapshot.satellites,
             positions,
-            masses,
+            radii,
             np.zeros(3),
             1.0e-6,
             TOP_BASIS,
@@ -101,7 +112,7 @@ class SatelliteRenderingTests(unittest.TestCase):
             (satellite,),
             {satellite.primary_body_id: np.zeros(3)},
             np.asarray(satellite.position_m),
-            2.0e-5,
+            4.0e-5,
             TOP_BASIS,
             80,
             40,
@@ -114,21 +125,174 @@ class SatelliteRenderingTests(unittest.TestCase):
         snapshot = SimulationWorld.from_catalog(load_catalog()).snapshot()
         satellite = snapshot.satellites[0]
         positions = {satellite.primary_body_id: np.zeros(3)}
-        common = dict(
-            satellites=(satellite,),
-            primary_positions_m=positions,
-            center_m=np.zeros(3),
-            scale=1.0e-6,
-            basis=TOP_BASIS,
-            columns=200,
-            rows=200,
+        normal = project_satellites(
+            (satellite,),
+            positions,
+            np.zeros(3),
+            1.0e-6,
+            TOP_BASIS,
+            200,
+            200,
             selected_satellite_id=None,
-        )
-        normal = project_satellites(**common, vertical_scale=1.0)[0]
-        stretched = project_satellites(**common, vertical_scale=2.0)[0]
-        expected_delta = round(satellite.position_m[1] * 1.0e-6)
+            vertical_scale=1.0,
+        )[0]
+        stretched = project_satellites(
+            (satellite,),
+            positions,
+            np.zeros(3),
+            1.0e-6,
+            TOP_BASIS,
+            200,
+            200,
+            selected_satellite_id=None,
+            vertical_scale=2.0,
+        )[0]
+        expected_delta = round(satellite.position_m[1] * 1.0e-6 / BRAILLE_ROWS_PER_CELL)
         self.assertEqual(stretched.row - 100, expected_delta * 2)
         self.assertEqual(normal.row - 100, expected_delta)
+
+    def test_satellite_and_orbit_pan_in_braille_cell_units(self) -> None:
+        snapshot = SimulationWorld.from_catalog(load_catalog()).snapshot()
+        satellite = snapshot.satellites[0]
+        positions = {satellite.primary_body_id: np.zeros(3)}
+        radii = {satellite.primary_body_id: 1.0}
+        scale = 1.0e-6
+        vertical_scale = 1.0
+        center_shift = np.asarray(
+            (
+                10.0 * BRAILLE_COLUMNS_PER_CELL / scale,
+                5.0 * BRAILLE_ROWS_PER_CELL / (scale * vertical_scale),
+                0.0,
+            )
+        )
+
+        marker = project_satellites(
+            (satellite,),
+            positions,
+            np.zeros(3),
+            scale,
+            TOP_BASIS,
+            1_000,
+            1_000,
+            selected_satellite_id=None,
+            vertical_scale=vertical_scale,
+        )[0]
+        shifted_marker = project_satellites(
+            (satellite,),
+            positions,
+            center_shift,
+            scale,
+            TOP_BASIS,
+            1_000,
+            1_000,
+            selected_satellite_id=None,
+            vertical_scale=vertical_scale,
+        )[0]
+        orbit = project_satellite_orbits(
+            (satellite,),
+            positions,
+            radii,
+            np.zeros(3),
+            scale,
+            TOP_BASIS,
+            1_000,
+            1_000,
+            selected_satellite_id=None,
+            vertical_scale=vertical_scale,
+        )[0]
+        shifted_orbit = project_satellite_orbits(
+            (satellite,),
+            positions,
+            radii,
+            center_shift,
+            scale,
+            TOP_BASIS,
+            1_000,
+            1_000,
+            selected_satellite_id=None,
+            vertical_scale=vertical_scale,
+        )[0]
+        point = Vec3(*satellite.position_m)
+        raster = BrailleRaster(1_000, 1_000)
+        planet_column, planet_row = Projector(
+            raster,
+            Vec3(),
+            scale,
+            TOP_BASIS,
+            vertical_scale,
+        ).project(point)
+        shifted_planet_column, shifted_planet_row = Projector(
+            raster,
+            Vec3(*center_shift),
+            scale,
+            TOP_BASIS,
+            vertical_scale,
+        ).project(point)
+
+        self.assertEqual(
+            (shifted_marker.column - marker.column, shifted_marker.row - marker.row),
+            (-10, 5),
+        )
+        self.assertEqual(
+            (
+                (shifted_planet_column // BRAILLE_COLUMNS_PER_CELL)
+                - (planet_column // BRAILLE_COLUMNS_PER_CELL),
+                (shifted_planet_row // BRAILLE_ROWS_PER_CELL)
+                - (planet_row // BRAILLE_ROWS_PER_CELL),
+            ),
+            (-10, 5),
+        )
+        self.assertEqual(
+            shifted_orbit.points,
+            tuple((column - 10, row + 5) for column, row in orbit.points),
+        )
+
+    def test_planet_occludes_orbit_samples_behind_camera_view(self) -> None:
+        snapshot = SimulationWorld.from_catalog(load_catalog()).snapshot()
+        satellite = snapshot.satellites[0]
+        radius_m = EARTH_MEAN_RADIUS_M * 2.0
+        speed_m_s = sqrt(
+            force_model_for("earth").gravitational_parameter_m3_s2 / radius_m
+        )
+        inclination_rad = radians(80.0)
+        edge_on = replace(
+            satellite,
+            primary_body_id="earth",
+            position_m=(radius_m, 0.0, 0.0),
+            velocity_m_s=(
+                0.0,
+                speed_m_s * cos(inclination_rad),
+                speed_m_s * sin(inclination_rad),
+            ),
+        )
+        positions = {"earth": np.zeros(3)}
+        common = (
+            (edge_on,),
+            positions,
+        )
+        unobscured = project_satellite_orbits(
+            *common,
+            {"earth": 0.0},
+            np.zeros(3),
+            1.0e-5,
+            TOP_BASIS,
+            1_000,
+            1_000,
+            selected_satellite_id=None,
+        )[0]
+        obscured = project_satellite_orbits(
+            *common,
+            {"earth": EARTH_MEAN_RADIUS_M},
+            np.zeros(3),
+            1.0e-5,
+            TOP_BASIS,
+            1_000,
+            1_000,
+            selected_satellite_id=None,
+        )[0]
+
+        self.assertGreater(len(obscured.points), 0)
+        self.assertLess(len(obscured.points), len(unobscured.points))
 
 
 class SatellitePanelTests(unittest.IsolatedAsyncioTestCase):

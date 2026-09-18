@@ -26,6 +26,8 @@ from typace.celestial.orbital import (
 )
 
 BRAILLE_BITS = ((1, 8), (2, 16), (4, 32), (64, 128))
+BRAILLE_COLUMNS_PER_CELL = 2
+BRAILLE_ROWS_PER_CELL = 4
 BRAILLE_BIT_WEIGHTS = np.asarray(BRAILLE_BITS, dtype=np.uint16)
 BRAILLE_CHARACTERS = np.asarray(
     tuple(" " if value == 0 else chr(0x2800 + value) for value in range(256))
@@ -148,8 +150,8 @@ class BrailleRaster:
     def __init__(self, columns: int, rows: int) -> None:
         self.columns = max(1, columns)
         self.rows = max(1, rows)
-        self.width = self.columns * 2
-        self.height = self.rows * 4
+        self.width = self.columns * BRAILLE_COLUMNS_PER_CELL
+        self.height = self.rows * BRAILLE_ROWS_PER_CELL
         self.colors: ColorArray = np.zeros((self.height, self.width, 3), dtype=np.uint8)
         self.occupied: BoolArray = np.zeros((self.height, self.width), dtype=np.bool_)
         self.materials: MaterialArray = np.zeros(
@@ -204,23 +206,40 @@ class BrailleRaster:
     def mark(self, x: int, y: int, marker: str, color: RGB, owner: str | None) -> None:
         if not (0 <= x < self.width and 0 <= y < self.height):
             return
-        column, row = x // 2, y // 4
+        column = x // BRAILLE_COLUMNS_PER_CELL
+        row = y // BRAILLE_ROWS_PER_CELL
         self.markers[(column, row)] = marker
-        for marker_y in range(row * 4, row * 4 + 4):
-            for marker_x in range(column * 2, column * 2 + 2):
+        for marker_y in range(
+            row * BRAILLE_ROWS_PER_CELL,
+            (row + 1) * BRAILLE_ROWS_PER_CELL,
+        ):
+            for marker_x in range(
+                column * BRAILLE_COLUMNS_PER_CELL,
+                (column + 1) * BRAILLE_COLUMNS_PER_CELL,
+            ):
                 self.set(marker_x, marker_y, color, owner)
 
     def to_scene(self) -> Scene:
         body_cells: dict[tuple[int, int], str] = {}
-        occupied_cells = self.occupied.reshape(self.rows, 4, self.columns, 2).transpose(
-            0, 2, 1, 3
-        )
-        color_cells = self.colors.reshape(self.rows, 4, self.columns, 2, 3).transpose(
-            0, 2, 1, 3, 4
-        )
-        owner_cells = self.owners.reshape(self.rows, 4, self.columns, 2).transpose(
-            0, 2, 1, 3
-        )
+        occupied_cells = self.occupied.reshape(
+            self.rows,
+            BRAILLE_ROWS_PER_CELL,
+            self.columns,
+            BRAILLE_COLUMNS_PER_CELL,
+        ).transpose(0, 2, 1, 3)
+        color_cells = self.colors.reshape(
+            self.rows,
+            BRAILLE_ROWS_PER_CELL,
+            self.columns,
+            BRAILLE_COLUMNS_PER_CELL,
+            3,
+        ).transpose(0, 2, 1, 3, 4)
+        owner_cells = self.owners.reshape(
+            self.rows,
+            BRAILLE_ROWS_PER_CELL,
+            self.columns,
+            BRAILLE_COLUMNS_PER_CELL,
+        ).transpose(0, 2, 1, 3)
         counts = occupied_cells.sum(axis=(2, 3), dtype=np.uint8)
         bits = np.sum(
             occupied_cells * BRAILLE_BIT_WEIGHTS,
@@ -271,7 +290,11 @@ class BrailleRaster:
                     text_offset + int(stop),
                 )
 
-        flat_owner_cells = owner_cells.reshape(self.rows, self.columns, 8)
+        flat_owner_cells = owner_cells.reshape(
+            self.rows,
+            self.columns,
+            BRAILLE_ROWS_PER_CELL * BRAILLE_COLUMNS_PER_CELL,
+        )
         owner_present = flat_owner_cells != None
         owner_counts = owner_present.sum(axis=2)
         first_owner_indices = np.argmax(owner_present, axis=2)
