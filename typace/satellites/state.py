@@ -50,3 +50,7 @@ class SatelliteSnapshot:
     planning_failure: str | None = None
     safety_reason: str | None = None
     conjunction_alert_ids: tuple[str, ...] = ()
+    periapsis_altitude_m: float | None = None
+    apoapsis_altitude_m: float | None = None
+    inclination_deg: float | None = None
+    orbital_period_s: float | None = None

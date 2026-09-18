@@ -126,6 +126,11 @@ class SimulationWorld:
             raise ValueError("time warp is not configured")
         self._selected_time_warp = multiplier
 
+    def set_elapsed_seconds(self, elapsed_seconds: float) -> None:
+        if not isfinite(elapsed_seconds):
+            raise ValueError("elapsed time must be finite")
+        self._elapsed_seconds = elapsed_seconds
+
     def submit(self, satellite_id: str, command: SatelliteCommand) -> CommandResult:
         state = self._satellites.get(satellite_id)
         if state is None:
@@ -717,6 +722,31 @@ def _snapshot(
     translation = state.translation
     attitude = state.vehicle.attitude
     resources = state.vehicle.resources
+    orbit = (
+        None
+        if autopilot.navigation.solution is None
+        else autopilot.navigation.solution.orbit
+    )
+    force_model = force_model_for(state.primary_body_id)
+    periapsis_altitude_m = (
+        None
+        if orbit is None
+        else orbit.semi_major_axis_m * (1.0 - orbit.eccentricity)
+        - force_model.body_radius_m
+    )
+    apoapsis_altitude_m = (
+        None
+        if orbit is None
+        else orbit.semi_major_axis_m * (1.0 + orbit.eccentricity)
+        - force_model.body_radius_m
+    )
+    orbital_period_s = (
+        None
+        if orbit is None
+        else 2.0
+        * pi
+        * sqrt(orbit.semi_major_axis_m**3 / force_model.gravitational_parameter_m3_s2)
+    )
     return SatelliteSnapshot(
         state.definition.id,
         state.definition.display_name,
@@ -742,6 +772,10 @@ def _snapshot(
         ),
         safety_reason.value,
         conjunction_alert_ids,
+        periapsis_altitude_m,
+        apoapsis_altitude_m,
+        None if orbit is None else np.degrees(orbit.inclination_rad),
+        orbital_period_s,
     )
 
 

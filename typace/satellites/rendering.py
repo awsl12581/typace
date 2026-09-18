@@ -11,6 +11,8 @@ from typace.satellites.state import SatelliteSnapshot
 SATELLITE_POINT_MARKER = "·"
 SATELLITE_OUTLINE_MARKER = "⊙"
 SATELLITE_CLOSE_MARKER = "◇"
+SATELLITE_ALERT_MARKER = "!"
+SATELLITE_THRUST_MARKER = "✦"
 SATELLITE_POINT_MAX_PROJECTED_RADIUS = 0.35
 SATELLITE_OUTLINE_MAX_PROJECTED_RADIUS = 1.5
 
@@ -62,7 +64,15 @@ def project_satellites(
                 satellite.id,
                 column,
                 row,
-                marker_glyph(projected_radius),
+                (
+                    SATELLITE_ALERT_MARKER
+                    if satellite.conjunction_alert_ids
+                    else (
+                        SATELLITE_THRUST_MARKER
+                        if satellite.execution_status == "burning"
+                        else marker_glyph(projected_radius)
+                    )
+                ),
                 satellite.id == selected_satellite_id,
             )
         )

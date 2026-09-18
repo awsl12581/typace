@@ -1,7 +1,7 @@
 """Native Textual satellite list, telemetry, and control panel."""
 
 from dataclasses import dataclass
-from math import radians
+from math import isfinite, radians
 
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
@@ -15,9 +15,12 @@ from typace.satellites.commands import (
     Deorbit,
     ManualActuation,
     ReturnAutonomousControl,
+    ReturnStableOrbit,
     SatelliteCommand,
     SetInclination,
+    SetApsides,
     SetOrbitAltitude,
+    TransferPrimary,
     TakeManualControl,
 )
 from typace.satellites.state import SatelliteSnapshot
@@ -33,9 +36,9 @@ class SatellitePanel(Widget):
     """Select a satellite and emit commands without owning simulation state."""
 
     DEFAULT_CSS = """
-    SatellitePanel { width: 38; height: 100%; background: #071019; border-left: solid #37cdf5; }
-    #satellite-list { height: 9; border-bottom: solid #264b5c; }
-    #satellite-telemetry { height: 10; padding: 0 1; color: #c8d7e8; }
+    SatellitePanel { width: 42; height: 100%; background: #071019; border-left: solid #37cdf5; }
+    #satellite-list { height: 7; border-bottom: solid #264b5c; }
+    #satellite-telemetry { height: 12; padding: 0 1; color: #c8d7e8; overflow-y: hidden; }
     .satellite-input-row { height: 3; }
     .satellite-input-row Label { width: 10; content-align: left middle; }
     .satellite-input-row Input { width: 1fr; }
@@ -71,15 +74,33 @@ class SatellitePanel(Widget):
             with Horizontal(classes="satellite-input-row"):
                 yield Label("Inclination")
                 yield Input(type="number", id="satellite-inclination")
+            with Horizontal(classes="satellite-input-row"):
+                yield Label("Apsis p/a")
+                yield Input(type="number", id="satellite-periapsis")
+                yield Input(type="number", id="satellite-apoapsis")
+            with Horizontal(classes="satellite-input-row"):
+                yield Label("Target body")
+                yield Input(id="satellite-target-body")
             with Horizontal(classes="satellite-actions"):
                 yield Button("Set orbit", id="satellite-set-orbit")
                 yield Button("Take control", id="satellite-take-control")
+                yield Button("Set apsides", id="satellite-set-apsides")
+                yield Button("Transfer", id="satellite-transfer")
+            with Horizontal(classes="satellite-actions"):
+                yield Button("Return stable", id="satellite-return-stable")
             with Horizontal(classes="satellite-actions"):
                 yield Button("Return auto", id="satellite-return-auto")
                 yield Button("Deorbit", id="satellite-deorbit", variant="warning")
             with Horizontal(classes="satellite-actions"):
                 yield Button("Ignite", id="satellite-ignite", variant="primary")
                 yield Button("Shutdown", id="satellite-shutdown")
+            with Horizontal(classes="satellite-input-row"):
+                yield Label("Throttle")
+                yield Input(type="number", id="satellite-throttle")
+                yield Input(placeholder="wheel x,y,z", id="satellite-wheel")
+                yield Input(placeholder="RCS x,y,z", id="satellite-rcs")
+            with Horizontal(classes="satellite-actions"):
+                yield Button("Manual apply", id="satellite-manual-apply")
             yield Static("", id="satellite-feedback")
 
     def set_snapshot(self, snapshot: WorldSnapshot) -> None:
@@ -135,6 +156,21 @@ class SatellitePanel(Widget):
             return None
         if button_id == "satellite-take-control":
             return TakeManualControl()
+        if button_id == "satellite-set-apsides":
+            periapsis = self._number_input("#satellite-periapsis")
+            apoapsis = self._number_input("#satellite-apoapsis")
+            if periapsis is None or apoapsis is None:
+                self.set_feedback("Enter periapsis and apoapsis")
+                return None
+            return SetApsides(periapsis, apoapsis)
+        if button_id == "satellite-transfer":
+            target = self.query_one("#satellite-target-body", Input).value.strip()
+            if target:
+                return TransferPrimary(target)
+            self.set_feedback("Enter a target body")
+            return None
+        if button_id == "satellite-return-stable":
+            return ReturnStableOrbit()
         if button_id == "satellite-return-auto":
             return ReturnAutonomousControl()
         if button_id == "satellite-deorbit":
@@ -143,6 +179,11 @@ class SatellitePanel(Widget):
             return ManualActuation(1.0, (0.0, 0.0, 0.0), (0.0, 0.0, 0.0))
         if button_id == "satellite-shutdown":
             return ManualActuation(0.0, (0.0, 0.0, 0.0), (0.0, 0.0, 0.0))
+        if button_id == "satellite-manual-apply":
+            throttle = self._number_input("#satellite-throttle") or 0.0
+            wheel = self._vector_input("#satellite-wheel") or (0.0, 0.0, 0.0)
+            rcs = self._vector_input("#satellite-rcs") or (0.0, 0.0, 0.0)
+            return ManualActuation(throttle, wheel, rcs)
         return None
 
     def _number_input(self, selector: str) -> float | None:
@@ -153,6 +194,17 @@ class SatellitePanel(Widget):
             return float(value)
         except ValueError:
             return None
+
+    def _vector_input(self, selector: str) -> tuple[float, float, float] | None:
+        values = self.query_one(selector, Input).value.strip().split(",")
+        if len(values) != 3:
+            return None
+        try:
+            vector = tuple(float(value.strip()) for value in values)
+        except ValueError:
+            return None
+        typed_vector = (vector[0], vector[1], vector[2])
+        return typed_vector if all(isfinite(value) for value in typed_vector) else None
 
     def _refresh_list(self) -> None:
         view = self.query_one("#satellite-list", ListView)
@@ -181,6 +233,17 @@ class SatellitePanel(Widget):
         if satellite is None:
             telemetry.update("No active satellite")
             return
+        snapshot = self._snapshot
+        assert snapshot is not None
+        recent_event = next(
+            (
+                event
+                for event in reversed(snapshot.destruction_events)
+                if satellite.id in event.satellite_ids
+            ),
+            None,
+        )
+        event_text = "-" if recent_event is None else recent_event.cause.value
         telemetry.update(
             "\n".join(
                 (
@@ -192,6 +255,13 @@ class SatellitePanel(Widget):
                     f"RCS      {satellite.rcs_propellant_kg:,.1f} kg",
                     f"Battery  {satellite.battery_energy_j / 3_600_000.0:,.2f} kWh",
                     f"Queue    {satellite.pending_command_count}",
+                    f"Orbit    p {satellite.periapsis_altitude_m or 0:,.0f} / a {satellite.apoapsis_altitude_m or 0:,.0f} m",
+                    f"Incl    {satellite.inclination_deg or 0:,.2f} deg",
+                    f"Plan     {satellite.plan_objective_id or '-'} / {satellite.execution_status or '-'}",
+                    f"Alerts   {', '.join(satellite.conjunction_alert_ids) or '-'}",
+                    f"Safety   {satellite.safety_reason or '-'}",
+                    f"Failure  {satellite.planning_failure or '-'}",
+                    f"Event    {event_text}",
                 )
             )
         )

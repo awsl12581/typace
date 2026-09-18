@@ -414,7 +414,8 @@ class TyPaceApp(App[None]):
         self._position_panels(self.size.width)
         self._update_panel_selection()
         self.set_interval(FRAME_INTERVAL_SECONDS, self._advance_world)
-        self.call_after_refresh(self.celestial_view.focus)
+        self.set_focus(self.celestial_view)
+        self.call_after_refresh(lambda: self.set_focus(self.celestial_view))
 
     def _advance_world(self) -> None:
         if self.celestial_view.paused:
@@ -423,6 +424,12 @@ class TyPaceApp(App[None]):
         snapshot = self.world.step(FRAME_INTERVAL_SECONDS)
         self.satellite_panel.set_snapshot(snapshot)
         self.celestial_view.set_world_snapshot(snapshot, self.selected_satellite_id)
+
+    def on_celestial_system_view_satellite_selected(
+        self, message: CelestialSystemView.SatelliteSelected
+    ) -> None:
+        self.selected_satellite_id = message.satellite_id
+        self.satellite_panel.set_snapshot(self.world.snapshot())
 
     def on_satellite_panel_selected(self, message: SatellitePanel.Selected) -> None:
         self.selected_satellite_id = message.selection.satellite_id
@@ -520,6 +527,11 @@ class TyPaceApp(App[None]):
             warp_index=result.warp_index,
             paused=result.paused,
         )
+        self.world.set_elapsed_seconds(result.elapsed_seconds)
+        self.world.set_time_warp(TIME_WARPS[result.warp_index])
+        snapshot = self.world.snapshot()
+        self.satellite_panel.set_snapshot(snapshot)
+        self.celestial_view.set_world_snapshot(snapshot, self.selected_satellite_id)
         self.simulation_panel.display = result.simulation_panel_visible
         self.camera_panel.display = result.camera_panel_visible
         for panel in self.control_panels:

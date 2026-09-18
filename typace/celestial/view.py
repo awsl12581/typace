@@ -3,6 +3,8 @@
 from rich.text import Text
 import numpy as np
 from textual import events
+from textual.message import Message
+from collections import deque
 from textual.widget import Widget
 
 from typace.celestial.bindings import VIEW_BINDINGS
@@ -84,6 +86,14 @@ class CelestialSystemView(Widget):
         self.world_snapshot: WorldSnapshot | None = None
         self.selected_satellite_id: str | None = None
         self.satellite_markers: tuple[SatelliteMarker, ...] = ()
+        self._world_clock_bound = False
+        self._satellite_trails: dict[str, deque[tuple[int, int]]] = {}
+        self._seen_destruction_event_ids: set[str] = set()
+
+    class SatelliteSelected(Message):
+        def __init__(self, satellite_id: str) -> None:
+            super().__init__()
+            self.satellite_id = satellite_id
 
     @property
     def selected_body(self) -> CelestialBody | None:
@@ -101,7 +111,7 @@ class CelestialSystemView(Widget):
 
     def advance(self) -> None:
         self.selection_seconds += FRAME_INTERVAL_SECONDS
-        if not self.paused:
+        if not self._world_clock_bound and not self.paused:
             self.elapsed_seconds += FRAME_INTERVAL_SECONDS * self.warp
         self.refresh()
 
@@ -146,6 +156,10 @@ class CelestialSystemView(Widget):
     ) -> None:
         self.world_snapshot = snapshot
         self.selected_satellite_id = selected_satellite_id
+        self._world_clock_bound = True
+        self.elapsed_seconds = snapshot.elapsed_seconds
+        if snapshot.selected_time_warp in TIME_WARPS:
+            self.warp_index = TIME_WARPS.index(snapshot.selected_time_warp)
         self.refresh()
 
     def set_simulation(
@@ -209,8 +223,7 @@ class CelestialSystemView(Widget):
             return self.last_scene.text
         primary_positions = {
             body_id: np.asarray((position.x, position.y, position.z))
-            for body_id in ("earth", "moon")
-            if (position := celestial_snapshot.positions.get(body_id)) is not None
+            for body_id, position in celestial_snapshot.positions.items()
         }
         center_vector = np.asarray((center.x, center.y, center.z))
         self.satellite_markers = project_satellites(
@@ -223,9 +236,28 @@ class CelestialSystemView(Widget):
             self.size.height,
             selected_satellite_id=self.selected_satellite_id,
         )
+        for marker in self.satellite_markers:
+            trail = self._satellite_trails.setdefault(
+                marker.satellite_id, deque(maxlen=24)
+            )
+            trail.append((marker.column, marker.row))
         lines = [list(line) for line in self.last_scene.text.plain.splitlines()]
+        for trail in self._satellite_trails.values():
+            for column, row in trail:
+                if 0 <= row < len(lines) and 0 <= column < len(lines[row]):
+                    if lines[row][column] == " ":
+                        lines[row][column] = "·"
         for marker in self.satellite_markers:
             lines[marker.row][marker.column] = marker.glyph
+        if self.world_snapshot is not None:
+            for event in self.world_snapshot.destruction_events:
+                if event.event_id not in self._seen_destruction_event_ids:
+                    self._seen_destruction_event_ids.add(event.event_id)
+                    trail = self._satellite_trails.get(event.satellite_ids[0], ())
+                    if trail:
+                        column, row = trail[-1]
+                        if 0 <= row < len(lines) and 0 <= column < len(lines[row]):
+                            lines[row][column] = "✹"
         overlaid = self.last_scene.text.copy()
         overlaid.plain = "\n".join("".join(line) for line in lines)
         for marker in self.satellite_markers:
@@ -319,6 +351,12 @@ class CelestialSystemView(Widget):
         offset = event.get_content_offset(self)
         if offset is None:
             return
+        for marker in self.satellite_markers:
+            if (marker.column, marker.row) == (offset.x, offset.y):
+                self.selected_satellite_id = marker.satellite_id
+                self.post_message(self.SatelliteSelected(marker.satellite_id))
+                self.refresh()
+                return
         body_id = self.last_scene.body_cells.get((offset.x, offset.y))
         if body_id is None:
             return

@@ -23,9 +23,9 @@ VIEW_BINDINGS: list[BindingType] = [
         translate(DEFAULT_LOCALE, "shortcut.focus"),
         show=False,
     ),
+    Binding("v", "cycle_view", translate(DEFAULT_LOCALE, "shortcut.view"), show=False),
     Binding("+", "zoom_in", translate(DEFAULT_LOCALE, "shortcut.zoom"), show=False),
     Binding("-", "zoom_out", translate(DEFAULT_LOCALE, "shortcut.zoom"), show=False),
-    Binding("v", "cycle_view", translate(DEFAULT_LOCALE, "shortcut.view"), show=False),
     Binding(
         "g", "system_view", translate(DEFAULT_LOCALE, "shortcut.system"), show=False
     ),

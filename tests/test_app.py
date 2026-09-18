@@ -233,6 +233,9 @@ class SolarSystemInteractionTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertNotIsInstance(application.screen, SettingsScreen)
             self.assertAlmostEqual(view.elapsed_seconds, 42.5 * DAY_SECONDS)
+            self.assertAlmostEqual(
+                application.world.snapshot().elapsed_seconds, 42.5 * DAY_SECONDS
+            )
             self.assertEqual(view.warp_index, 3)
             self.assertTrue(view.paused)
             self.assertIn("Earth", application.query_one(StatusBar).render().plain)

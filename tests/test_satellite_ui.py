@@ -7,6 +7,8 @@ from typace.satellites import load_catalog
 from typace.satellites.commands import SetOrbitAltitude, TakeManualControl
 from typace.satellites.rendering import (
     SATELLITE_CLOSE_MARKER,
+    SATELLITE_ALERT_MARKER,
+    SATELLITE_THRUST_MARKER,
     SATELLITE_OUTLINE_MARKER,
     SATELLITE_POINT_MARKER,
     marker_glyph,
@@ -35,6 +37,41 @@ class SatelliteRenderingTests(unittest.TestCase):
         self.assertEqual(marker_glyph(0.1), SATELLITE_POINT_MARKER)
         self.assertEqual(marker_glyph(1.0), SATELLITE_OUTLINE_MARKER)
         self.assertEqual(marker_glyph(2.0), SATELLITE_CLOSE_MARKER)
+
+    def test_alert_and_thrust_markers_are_visible_states(self) -> None:
+        snapshot = SimulationWorld.from_catalog(load_catalog()).snapshot()
+        satellite = snapshot.satellites[0]
+        from dataclasses import replace
+
+        alerted = replace(satellite, conjunction_alert_ids=("a:b",))
+        thrusting = replace(satellite, execution_status="burning")
+        from typace.satellites.rendering import project_satellites
+        from typace.celestial.rendering import TOP_BASIS
+        import numpy as np
+
+        positions = {satellite.primary_body_id: np.zeros(3)}
+        alert_marker = project_satellites(
+            (alerted,),
+            positions,
+            np.zeros(3),
+            1.0e-6,
+            TOP_BASIS,
+            80,
+            40,
+            selected_satellite_id=None,
+        )[0]
+        thrust_marker = project_satellites(
+            (thrusting,),
+            positions,
+            np.zeros(3),
+            1.0e-6,
+            TOP_BASIS,
+            80,
+            40,
+            selected_satellite_id=None,
+        )[0]
+        self.assertEqual(alert_marker.glyph, SATELLITE_ALERT_MARKER)
+        self.assertEqual(thrust_marker.glyph, SATELLITE_THRUST_MARKER)
 
 
 class SatellitePanelTests(unittest.IsolatedAsyncioTestCase):
