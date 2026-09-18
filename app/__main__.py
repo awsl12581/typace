@@ -5,6 +5,7 @@ from pathlib import Path
 
 from typace.application import TyPaceApp
 from typace.config.ui import DEFAULT_FALLBACK_FONTS, DEFAULT_FONT
+from typace.privacy import sanitize_text
 from typace.ui import WindowOptions, run
 
 
@@ -20,20 +21,23 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    application = TyPaceApp(tuple(args.satellite_catalog))
-    if args.backend == "terminal":
-        run(application)
-        return
+    try:
+        application = TyPaceApp(tuple(args.satellite_catalog))
+        if args.backend == "terminal":
+            run(application)
+            return
 
-    run(
-        application,
-        backend="sdl",
-        window=WindowOptions(
-            font=str(DEFAULT_FONT),
-            fallback_fonts=DEFAULT_FALLBACK_FONTS,
-            title="typace - Solar System",
-        ),
-    )
+        run(
+            application,
+            backend="sdl",
+            window=WindowOptions(
+                font=str(DEFAULT_FONT),
+                fallback_fonts=DEFAULT_FALLBACK_FONTS,
+                title="typace - Solar System",
+            ),
+        )
+    except Exception as error:
+        raise SystemExit(sanitize_text(str(error))) from None
 
 
 if __name__ == "__main__":
