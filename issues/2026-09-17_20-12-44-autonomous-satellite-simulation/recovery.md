@@ -3,9 +3,9 @@
 ## Recovery point
 
 - Mission CSV: `2026-09-17_20-12-44-autonomous-satellite-simulation.csv`
-- Last code commit: pending WIRE-01 closure commit
-- Last completed implementation: `WIRE-01` production wiring and acceptance closure
-- Next execution item: run `REVIEW-01`
+- Last code commit: `48e3b00`
+- Last completed review: `REVIEW-01` (`gaps_found`)
+- Next execution item: `FOLLOWUP-01` production flight-control wiring
 
 ## Completed before interruption
 
@@ -27,9 +27,10 @@
 
 ## State reconciliation completed
 
-`WIRE-01` is closed in the CSV with current verification evidence. The next
-resume point is the required closing review, including its review log,
-humanized handoff, and contract check.
+`WIRE-01` and `REVIEW-01` are closed. The independent review found four
+current-scope gaps, now recorded as `FOLLOWUP-01` through `FOLLOWUP-04`, followed
+by `REVIEW-02`. Resume at `FOLLOWUP-01` and continue without skipping the later
+review.
 
 ## Constraints to preserve
 

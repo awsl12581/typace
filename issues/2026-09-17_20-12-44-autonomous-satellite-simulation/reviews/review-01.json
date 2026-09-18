@@ -1,0 +1,109 @@
+{
+  "review_agent_mode": "reviewer-subagent",
+  "review_independence": true,
+  "review_requested_model": "gpt-5.6-sol",
+  "review_observed_model": "unknown",
+  "review_model_evidence": "unknown",
+  "result": "gaps_found",
+  "claim_coverage": "14/39",
+  "claim_coverage_status": "gaps",
+  "validation_limited": [
+    "Computer Use inventory did not expose the running SDL window; real SDL/OpenGL tests supplied the GPU evidence instead."
+  ],
+  "summary": "The flight, planning, control, and conjunction modules exist, but the production world does not call them. High-level commands remain queued, the app has two clocks, the satellite UI is incomplete, and the SDL and 64-satellite evidence covers a narrower workload than the approved specification.",
+  "gaps": [
+    {
+      "id": "FOLLOWUP-01",
+      "title": "接通生产飞行控制闭环",
+      "source_ref": "docs/specs/2026-09-17-autonomous-satellite-simulation.md:415",
+      "evidence_ref": "typace/simulation/world.py:149",
+      "why_it_matters": "Production never calls the autopilot, execution, manual safety, or high-level command planning paths.",
+      "suggested_followup_issue": "Wire queued objectives, autonomous execution, manual safety, and observable plan/failure state into the single world transition path."
+    },
+    {
+      "id": "FOLLOWUP-02",
+      "title": "闭环地月转移交会与生命周期",
+      "source_ref": "docs/specs/2026-09-17-autonomous-satellite-simulation.md:459",
+      "evidence_ref": "typace/flight/autopilot.py:118",
+      "why_it_matters": "Transfer and avoidance are planning-only, while SOI changes, predictive conjunction response, and several destruction cases lack production execution evidence.",
+      "suggested_followup_issue": "Execute Earth-Moon plans through the world, perform continuous SOI changes, wire conjunction avoidance, and verify all lifecycle outcomes."
+    },
+    {
+      "id": "FOLLOWUP-03",
+      "title": "完成共享时钟卫星界面与图形验收",
+      "source_ref": "docs/specs/2026-09-17-autonomous-satellite-simulation.md:463",
+      "evidence_ref": "typace/satellites/widgets.py:64",
+      "why_it_matters": "The app advances separate celestial and world clocks, and the UI/SDL tests omit required satellite controls, status, mouse selection, alerts, trajectories, and destruction visuals.",
+      "suggested_followup_issue": "Use the world as the sole clock, complete native Textual satellite controls and rendering, and verify them in the real SDL/GPU path."
+    },
+    {
+      "id": "FOLLOWUP-04",
+      "title": "补齐净化与代表性全量验收",
+      "source_ref": "docs/specs/2026-09-17-autonomous-satellite-simulation.md:538",
+      "evidence_ref": "tests/test_world.py:140",
+      "why_it_matters": "The benchmark omits production autonomy and conjunction, all-exit sanitization is incomplete, and evidence metadata overstates delivered behavior.",
+      "suggested_followup_issue": "Add the complete 64-satellite deterministic workload, sanitize startup and runtime exits, and reconcile claim evidence with actual results."
+    }
+  ],
+  "assumptions": [],
+  "decision_debt": [],
+  "deferred_findings": [],
+  "human_required_blockers": [],
+  "outcome_answers": [
+    {
+      "question_id": "OUTCOME-001",
+      "verdict": "pass",
+      "answer": "六颗附带卫星和外部卫星通过严格本地 JSON 加载、历元归一化和稳定排序进入同一个世界。",
+      "evidence_refs": ["tests/test_satellite_catalog.py:21", "tests/test_world.py:26"],
+      "confidence": "high",
+      "boundary": "该结论只覆盖数据进入世界，不代表后续自主控制已经接线。",
+      "next_action": "None"
+    },
+    {
+      "question_id": "OUTCOME-002",
+      "verdict": "fail",
+      "answer": "物理与资源状态已统一，但生产世界没有调用自动驾驶、共享安全、交会、SOI 和转移执行路径。",
+      "evidence_refs": ["typace/simulation/world.py:149", "typace/simulation/world.py:337"],
+      "confidence": "high",
+      "boundary": "独立模块单测不能证明生产闭环。",
+      "next_action": "完成 FOLLOWUP-01 和 FOLLOWUP-02。"
+    },
+    {
+      "question_id": "OUTCOME-003",
+      "verdict": "fail",
+      "answer": "规划模块能生成部分计划，但生产世界不能完成自主任务、避碰或接管归还后的重规划。",
+      "evidence_refs": ["typace/flight/autopilot.py:59", "tests/test_planning.py:170"],
+      "confidence": "high",
+      "boundary": "现有证据是模块级，不是玩家可达的端到端行为。",
+      "next_action": "完成 FOLLOWUP-01 和 FOLLOWUP-02，并增加生产路径测试。"
+    },
+    {
+      "question_id": "OUTCOME-004",
+      "verdict": "partial",
+      "answer": "终端与 SDL 共用 TyPaceApp，真实 GPU 渲染已通过，但卫星面板、告警、轨迹和鼠标选星没有完整实现或验证。",
+      "evidence_refs": ["tests/test_ui.py:120", "tests/test_app.py:544", "typace/satellites/widgets.py:64"],
+      "confidence": "high",
+      "boundary": "通用 SDL 渲染通过不等于卫星功能验收通过。",
+      "next_action": "完成 FOLLOWUP-03 并运行卫星专属真实 SDL 测试。"
+    },
+    {
+      "question_id": "OUTCOME-005",
+      "verdict": "fail",
+      "answer": "当前 64 星 P95 测试只覆盖空闲世界更新，没有覆盖生产自动驾驶和预测交会，也没有断言重复结果一致。",
+      "evidence_refs": ["tests/test_world.py:140", "typace/simulation/world.py:149"],
+      "confidence": "high",
+      "boundary": "15.321ms 只能代表当前较窄的空闲负载。",
+      "next_action": "完成生产接线后在 FOLLOWUP-04 重跑代表性基准与确定性对照。"
+    },
+    {
+      "question_id": "OUTCOME-006",
+      "verdict": "fail",
+      "answer": "目录诊断和部分 UI 文本已净化，但启动异常仍可落入普通 traceback，尚未形成全出口净化边界。",
+      "evidence_refs": ["typace/privacy.py:1", "app/__main__.py:11"],
+      "confidence": "high",
+      "boundary": "现有测试没有覆盖日志、启动失败、事件和所有对外输出。",
+      "next_action": "在 FOLLOWUP-04 接通统一异常净化并增加集成测试。"
+    }
+  ],
+  "handoff_markdown": "Independent reviewer draft was humanized and rendered to the sibling .handoff.md artifact."
+}

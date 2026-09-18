@@ -1,0 +1,20 @@
+## REVIEW-01
+- Source doc: docs/specs/2026-09-17-autonomous-satellite-simulation.md
+- Review agent: reviewer-subagent
+- Review independence: true
+- Review requested model: gpt-5.6-sol
+- Review observed model: unknown
+- Review model evidence: unknown
+- Scope checked: 39 claims, production wiring, outcome questions, terminal/SDL UI, performance, lifecycle, sanitization
+- Evidence checked: commits through 48e3b00, production code, full unittest, real SDL tests, Black, Pyright, claim and outcome ledgers
+- Claim coverage: gaps (14/39 met, 10 partial, 15 unmet)
+- Claim/evidence alignment: mismatches found
+- Limited validation honestly reported: yes
+- Handoff humanized: true
+- Result: gaps_found
+- Gaps: FOLLOWUP-01 production flight control; FOLLOWUP-02 transfer/conjunction/lifecycle; FOLLOWUP-03 clock/UI/SDL; FOLLOWUP-04 sanitization and representative acceptance
+- Follow-up issues added: FOLLOWUP-01, FOLLOWUP-02, FOLLOWUP-03, FOLLOWUP-04, REVIEW-02
+- Assumptions: none
+- Decision debt: none
+- Deferred findings: none
+- Human-required blockers: none
